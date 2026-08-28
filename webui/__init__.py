@@ -1,0 +1,1 @@
+# WebOllama - Web Panel for Ollama + GPU Monitoring

@@ -1,0 +1,37 @@
+# WebOllama — docker compose (runs ON the same server as Ollama + GPU)
+# GPU monitoring uses NVML / nvidia-smi on the host. Use host networking so
+# 127.0.0.1:11434 works and NVML can reach the GPU when the NVIDIA Container
+# Toolkit is installed (uncomment the deploy.resources section below).
+services:
+  webui:
+    build: .
+    container_name: webollama
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - OLLAMA_URL=${OLLAMA_URL:-http://127.0.0.1:11434}
+      - SYSINFO_URL=${SYSINFO_URL:-}
+      - AUTH_ENABLED=${AUTH_ENABLED:-true}
+      - DEFAULT_ADMIN_USER=${DEFAULT_ADMIN_USER:-admin}
+      - DEFAULT_ADMIN_PASSWORD=${DEFAULT_ADMIN_PASSWORD:-changeme}
+      - WEBUI_HOST=0.0.0.0
+      - WEBUI_PORT=8080
+    volumes:
+      - webui-data:/app/data
+      - webui-logs:/app/logs
+    # To monitor the GPU from inside the container (requires NVIDIA Container
+    # Toolkit + driver libs mounted):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    #
+    # For the simplest and most reliable GPU stats, prefer running on the host:
+    #   ./start.sh   (or  ./install.sh --systemd)
+
+volumes:
+  webui-data:
+  webui-logs:

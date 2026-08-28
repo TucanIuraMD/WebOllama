@@ -1,0 +1,34 @@
+[Unit]
+Description=WebOllama — Web Panel for Ollama + GPU Monitoring
+Documentation=https://github.com/ollama/ollama
+After=network-online.target ollama.service
+Wants=network-online.target ollama.service
+# NOTE: Ollama is not a hard requirement to START this unit — WebOllama shows
+# "OLLAMA OFFLINE" if Ollama is not reachable. Change to Requires= if Ollama
+# must be running first.
+
+[Service]
+Type=simple
+User=ollama-web
+Group=ollama-web
+# video group → access to /dev/nvidia* for NVML / nvidia-smi
+# systemd-journal → read-only access to journald (v100-fan.service state lines)
+SupplementaryGroups=video systemd-journal
+WorkingDirectory=/opt/ollama-web
+EnvironmentFile=-/opt/ollama-web/.env
+ExecStart=/opt/ollama-web/venv/bin/python -m webui.main
+Restart=always
+RestartSec=5
+# Logging
+StandardOutput=journal
+StandardError=journal
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/opt/ollama-web/data /opt/ollama-web/logs
+TimeoutStartSec=60
+
+[Install]
+WantedBy=multi-user.target

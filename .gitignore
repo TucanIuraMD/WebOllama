@@ -1,0 +1,50 @@
+# ---- Runtime / local state ----
+# Never commit local machine state, secrets or runtime data.
+.env
+data/
+logs/
+*.log
+*.pid
+*.db
+*.sqlite
+*.sqlite3
+webui.pid
+
+# ---- Python ----
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Node / frontend ----
+node_modules/
+.npm-cache/
+package-lock.json
+package.json
+
+# ---- IDE / editor ----
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# ---- Systemd / deploy ----
+/etc/
+*.service.old
+
+# ---- Secrets (defensive — even if misplaced) ----
+*.pem
+*.key
+*.p12
+id_rsa*
+id_ed25519*
+*.pem
+.cookie*
+secrets.*
