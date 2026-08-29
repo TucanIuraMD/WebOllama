@@ -41,11 +41,11 @@ if [ "${1:-}" = "--systemd" ]; then
     # dedicated user + video group (GPU access via /dev/nvidia*) +
     # systemd-journal group (read-only access to journald for v100-fan state)
     if ! id -u ollama-web >/dev/null 2>&1; then
-      useradd -r -s /usr/sbin/nologin -d /opt/ollama-web ollama-web
+      useradd -r -s /usr/sbin/nologin -d /opt/projects/WebOllama ollama-web
     fi
     usermod -a -G video,systemd-journal ollama-web 2>/dev/null || true
     chown -R ollama-web:ollama-web "$PWD"
-    sed "s|/opt/ollama-web|$PWD|g" ollama-web.service > /etc/systemd/system/ollama-web.service
+    sed "s|/opt/projects/WebOllama|$PWD|g" ollama-web.service > /etc/systemd/system/ollama-web.service
     systemctl daemon-reload
     systemctl enable ollama-web
     systemctl restart ollama-web || true

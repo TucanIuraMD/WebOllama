@@ -75,8 +75,8 @@ Real screenshots go in [`docs/images/`](docs/images/) and are referenced here. *
 ## Quick Start
 
 ```bash
-git clone <your-webollama-repo> /opt/ollama-web
-cd /opt/ollama-web
+git clone <your-webollama-repo> /opt/projects/WebOllama
+cd /opt/projects/WebOllama
 ./install.sh                # venv + deps + .env
 ./start.sh                  # Web UI on 0.0.0.0:8080
 ```
@@ -88,7 +88,7 @@ Open **http://<server>:8080** from any device (default login `admin` / `changeme
 ### systemd (recommended)
 
 ```bash
-cd /opt/ollama-web
+cd /opt/projects/WebOllama
 ./install.sh --systemd
 systemctl status ollama-web
 ```
@@ -98,7 +98,7 @@ Creates a dedicated `ollama-web` user, grants `video` (GPU access) and `systemd-
 ### Docker
 
 ```bash
-cd /opt/ollama-web
+cd /opt/projects/WebOllama
 docker compose up -d
 ```
 

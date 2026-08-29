@@ -14,9 +14,9 @@ Group=ollama-web
 # video group → access to /dev/nvidia* for NVML / nvidia-smi
 # systemd-journal → read-only access to journald (v100-fan.service state lines)
 SupplementaryGroups=video systemd-journal
-WorkingDirectory=/opt/ollama-web
-EnvironmentFile=-/opt/ollama-web/.env
-ExecStart=/opt/ollama-web/venv/bin/python -m webui.main
+WorkingDirectory=/opt/projects/WebOllama
+EnvironmentFile=-/opt/projects/WebOllama/.env
+ExecStart=/opt/projects/WebOllama/venv/bin/python -m webui.main
 Restart=always
 RestartSec=5
 # Logging
@@ -27,7 +27,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=read-only
-ReadWritePaths=/opt/ollama-web/data /opt/ollama-web/logs
+ReadWritePaths=/opt/projects/WebOllama/data /opt/projects/WebOllama/logs
 TimeoutStartSec=60
 
 [Install]

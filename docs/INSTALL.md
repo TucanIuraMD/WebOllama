@@ -15,8 +15,8 @@ direct access to NVML, `nvidia-smi` and the journal.
 
 ```bash
 # 1. Copy the project to the server
-git clone <your-webollama-repo> /opt/ollama-web
-cd /opt/ollama-web
+git clone <your-webollama-repo> /opt/projects/WebOllama
+cd /opt/projects/WebOllama
 
 # 2. Install (venv + dependencies + .env)
 ./install.sh
@@ -55,7 +55,7 @@ systemctl restart ollama-web
 ## Method 2 — Docker
 
 ```bash
-cd /opt/ollama-web
+cd /opt/projects/WebOllama
 docker compose up -d
 ```
 

@@ -3,8 +3,8 @@
 ## Setup
 
 ```bash
-git clone <repo> /opt/ollama-web
-cd /opt/ollama-web
+git clone <repo> /opt/projects/WebOllama
+cd /opt/projects/WebOllama
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
