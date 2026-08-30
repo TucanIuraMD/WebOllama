@@ -132,6 +132,31 @@ async def test_console_blocks_injection(client):
 
 
 @pytest.mark.asyncio
+async def test_chat_run(client, mock_ollama):
+    _login(client)
+    r = client.post("/api/chat/run", json={
+        "model": "qwen3:8b",
+        "messages": [{"role": "user", "content": "hello"}],
+    })
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    assert data["message"]["role"] == "assistant"
+    assert data["message"]["content"] == "mock chat reply"
+    assert data["model"] == "qwen3:8b"
+    assert data["eval_count"] == 3
+
+
+@pytest.mark.asyncio
+async def test_chat_run_validation(client):
+    _login(client)
+    r = client.post("/api/chat/run", json={"messages": [{"role": "user", "content": "hi"}]})
+    assert r.status_code == 400
+    r = client.post("/api/chat/run", json={"model": "qwen3:8b", "messages": []})
+    assert r.status_code == 400
+
+
+@pytest.mark.asyncio
 async def test_settings(client):
     _login(client)
     r = client.get("/api/settings")

@@ -19,6 +19,7 @@ from .realtime import RealtimeService
 from .routers import (
     audit as audit_router,
     auth as auth_router,
+    chat as chat_router,
     console as console_router,
     jobs as jobs_router,
     llm as llm_router,
@@ -150,6 +151,7 @@ async def index():
 app.include_router(auth_router.router)
 app.include_router(status_router.router)
 app.include_router(ollama_router.router)
+app.include_router(chat_router.router)
 app.include_router(jobs_router.router)
 app.include_router(console_router.router)
 app.include_router(llm_router.router)

@@ -108,6 +108,17 @@ class MockOllama:
                 if not any(m["name"] == body.get("model") for m in self.models):
                     return httpx.Response(404, json={"error": "model not found"})
                 return httpx.Response(200, json={"done": True, "response": "mock"})
+            if path == "/api/chat":
+                if not any(m["name"] == body.get("model") for m in self.models):
+                    return httpx.Response(404, json={"error": "model not found"})
+                return httpx.Response(200, json={
+                    "model": body.get("model", ""),
+                    "done": True,
+                    "message": {"role": "assistant", "content": "mock chat reply"},
+                    "total_duration": 1_234_567,
+                    "prompt_eval_count": 5,
+                    "eval_count": 3,
+                })
             if path in ("/api/pull", "/api/push", "/api/create"):
                 name = body.get("name", "")
                 # stream a few progress lines then success
