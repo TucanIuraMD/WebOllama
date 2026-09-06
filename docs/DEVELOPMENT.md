@@ -30,7 +30,7 @@ webui/
 ├── realtime.py           # WebSocket snapshot + metric persistence loops
 ├── mock/                 # mock collectors for tests / dev only
 ├── routers/              # FastAPI route handlers
-│   ├── auth.py, status.py, ollama.py, jobs.py, console.py
+│   ├── auth.py, status.py, ollama.py, agents.py, jobs.py, console.py
 │   ├── llm.py, logs.py, settings.py, audit.py, ws.py
 └── static/               # SPA frontend
     ├── index.html
@@ -63,6 +63,7 @@ python -m pytest tests/ -x -v       # stop on first failure, verbose
 - `test_jobs.py` — job lifecycle, cancellation, persistence
 - `test_auth.py` — password hashing, sessions, login
 - `test_api.py` — REST endpoints via TestClient
+- `test_agents.py` — Agents tab: schema, assessments CRUD, untested semantics, variant separation
 - `test_llm_api.py` — LLM provider, masking, SSRF, manager
 - `test_v100_fan.py` — fan parser, journal reader, permission diagnostics
 - `test_realtime.py` — snapshot, metrics, history
@@ -86,6 +87,15 @@ node scripts/uitest/smoke.mjs       # jsdom SPA test (9 pages, auth, rendering)
 2. Register it in `make_provider()`
 3. Add the default endpoint to `DEFAULT_ENDPOINTS` (or document for manual add)
 4. No frontend changes needed — the UI renders providers generically
+
+## Adding a new Agent environment or capability (Agents tab)
+
+No code changes are required: agents and capabilities are DB rows.
+
+- Runtime: `POST /api/agents/agents {"name": "Automation"}` or
+  `POST /api/agents/capabilities {"name": "OCR"}` (admin)
+- Seed defaults: `Database.AGENTS_SEED_AGENTS` / `AGENTS_SEED_CAPABILITIES` in `webui/db.py`
+- The matrix UI renders whatever agents/capabilities exist in the DB
 
 ## Adding a new GPU metric
 

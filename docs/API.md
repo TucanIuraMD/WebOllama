@@ -71,6 +71,27 @@ Authenticate via:
 | GET | `/api/console/allowed` | Yes | List allowed commands |
 | POST | `/api/console/run` | Yes | Execute a whitelisted Ollama command |
 
+### Agents
+
+Practical Models × Agents knowledge base (not a benchmark; no auto-scoring).
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/agents` | Yes | Configured agents + capabilities (DB rows, extensible) |
+| GET | `/api/agents/capabilities` | Yes | Capability catalog |
+| GET | `/api/agents/matrix` | Yes | Models (live from Ollama `/api/tags`) × agents + saved assessments; `ollama_online:false` degrades to saved data only |
+| GET | `/api/agents/models/{model}` | Yes | One model: Ollama meta (if present) + all its assessments |
+| POST | `/api/agents/agents` | Admin | Add a new agent/environment (e.g. Automation) |
+| POST | `/api/agents/capabilities` | Admin | Add a new capability (e.g. OCR) |
+| POST | `/api/agents/assessments` | Yes | Create/update one assessment: `{model, agent_id \| agent(slug), status: untested\|failed\|works\|good, note?, capabilities?, tested_at?}`; `tested_at` is server-generated, `untested` clears it |
+| DELETE | `/api/agents/assessments/{id}` | Yes | Reset a cell to untested |
+
+Model references are exact Ollama model names — variants such as
+`deepseek-coder-v2` and `deepseek-coder-v2-tools-16k` stay separate rows.
+Assessments exist independently of Ollama lifecycle: deleting a model in
+Ollama never deletes its assessment history, and assessments can be edited
+while Ollama is offline.
+
 ### LLM API
 
 | Method | Path | Auth | Description |

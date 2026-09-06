@@ -32,6 +32,18 @@ Real screenshots go in [`docs/images/`](docs/images/) and are referenced here. *
 - All long operations (pull, push, create, delete, copy, stop) run as async Jobs
 - Live progress over WebSocket, persisted to SQLite (survive restart), cancellable
 
+### Agents
+- Practical knowledge base: **which model actually works in which environment/agent**
+  (Hermes, OpenCode, Claude, OpenWebUI — extensible at runtime)
+- **Models × Agents matrix**: rows = live Ollama models (each variant separate),
+  columns = agents, cell = human-verified assessment (status, capabilities, note, tested date)
+- Statuses: `untested —` / `failed ❌` / `works ✓` / `good ✓✓` (no scores; **untested ≠ failed**;
+  a new model appears as *untested*, never pre-marked)
+- Click a cell → editor (status, capabilities, note; tested_at set automatically; reset to untested)
+- Click a model → per-agent detail view; combined filters: search + agent + capability + status
+- Deliberately **not a benchmark**: nothing is auto-scored and benchmark results never
+  modify Agents assessments
+
 ### System Monitoring
 - CPU (usage, load 1/5/15, cores, frequency), RAM, swap, disk, network per interface
 - Top CPU / memory processes, Ollama process (PID, CPU, memory, status)
