@@ -252,15 +252,20 @@
         ? a.capabilities.map((c) => `<span class="badge">${esc(c.name)}</span>`).join(" ")
         : "";
       const tested = a && a.tested_at ? new Date(a.tested_at * 1000).toLocaleString() : "";
-      return `<div class="mv-row">
+      // Whole row opens the assessment editor (same editor as matrix cells);
+      // the explicit Edit button is the accessible fallback.
+      return `<div class="mv-row" data-action="agents-cell" data-model="${esc(m.name)}" data-agent="${ag.id}" title="Click to edit assessment for ${esc(ag.name)}">
         <span class="mv-agent">${esc(ag.name)}</span>
         <span class="mv-status st-${st}">${STATUS_MARK[st]}</span>
         <span class="mv-caps">${caps || '<span class="text-faint">—</span>'}</span>
         <span class="mv-note">${esc(a && a.note ? a.note : "")}${tested ? ` <span class="text-faint">· ${esc(tested)}</span>` : ""}</span>
+        <button type="button" class="btn btn-sm mv-edit" data-action="agents-cell" data-model="${esc(m.name)}" data-agent="${ag.id}">Edit</button>
       </div>`;
     }).join("");
     return `<div class="card" style="margin:8px 0 4px;background:var(--bg-3)">
-      <div class="card-title" style="font-size:13px">Assessments — ${esc(m.name)} <span class="text-dim" style="font-weight:400">(click model again to collapse)</span></div>
+      <div class="card-title" style="font-size:13px">Assessments — ${esc(m.name)}
+        <span class="right"><button type="button" class="btn btn-sm" data-action="agents-model" data-model="${esc(m.name)}">Collapse</button></span>
+      </div>
       ${rows}
     </div>`;
   }

@@ -184,6 +184,71 @@ async function main() {
     assert(!modalOpen);
   });
 
+  // ---- model view: collapse control + clickable rows ----
+  resetApi();
+  global.document.querySelector = () => null;
+  global.document.querySelectorAll = () => [];
+  global.Actions['agents-model']({ model: 'qwen3:8b' }); // expand
+  let wv = els['agents-matrix-wrap'].innerHTML;
+  await check('expanded model shows a real Collapse button (no plain-text hint)', () => {
+    assert(wv.includes('>Collapse</button>'));
+    assert(wv.includes('data-action="agents-model" data-model="qwen3:8b"'));
+    assert(!/click model again to collapse/i.test(wv));
+  });
+  await check('model view rows are clickable (open editor) with Edit fallback', () => {
+    const rows = (wv.match(/class="mv-row" data-action="agents-cell"/g) || []).length;
+    assert(rows === 2, 'expected 2 clickable mv-rows, got ' + rows);
+    assert(wv.includes('>Edit</button>'));
+  });
+  global.Actions['agents-cell']({ model: 'qwen3:8b', agent: '1' });
+  await check('editor opens from the model-view row (qwen3:8b x Hermes)', () => {
+    assert(modalOpen && modalHtml.includes('qwen3:8b') && modalHtml.includes('Hermes'));
+    assert(modalHtml.includes('ed-status') && modalHtml.includes('ed-caps') && modalHtml.includes('ed-note'));
+  });
+  global.closeModal();
+  await check('Collapse works independently of the editor', () => {
+    global.Actions['agents-model']({ model: 'qwen3:8b' });
+    const w2 = els['agents-matrix-wrap'].innerHTML;
+    assert(!w2.includes('Assessments — qwen3:8b'));
+  });
+
+  // ---- save from the model-view editor + reopen shows saved data ----
+  global.Actions['agents-model']({ model: 'llama3.2:1b' }); // expand
+  global.Actions['agents-cell']({ model: 'llama3.2:1b', agent: '2' });
+  global.document.querySelector = (sel) => (sel.includes('ed-status') ? { value: 'works' } : null);
+  global.document.querySelectorAll = (sel) => (sel.includes('ed-caps') ? [{ value: '2' }] : []);
+  inp('ed-note').value = 'verified in model view';
+  responders['POST /api/agents/assessments'] = () => ({ ok: true, assessment: {
+    id: 11, model: 'llama3.2:1b', agent_id: 2, status: 'works', note: 'verified in model view',
+    tested_at: 1757000100, agent_name: 'OpenCode', agent_slug: 'opencode',
+    capabilities: [{ id: 2, name: 'Chat', slug: 'chat' }] } });
+  await global.AgentsPage.saveCell();
+  await check('save from model-view editor posts correct payload and closes modal', () => {
+    const call = apiCalls.find((c) => c[0] === 'POST' && c[1] === '/api/agents/assessments');
+    assert(call && call[2].model === 'llama3.2:1b' && call[2].agent_id === 2 &&
+           call[2].status === 'works' && call[2].note === 'verified in model view');
+    assert(!modalOpen);
+  });
+  await check('saved assessment visible immediately in expanded view + matrix', () => {
+    const w3 = els['agents-matrix-wrap'].innerHTML;
+    assert(w3.includes('Assessments — llama3.2:1b')); // expansion survived the save re-render
+    assert(w3.includes('verified in model view'));
+    assert(w3.includes('chat')); // capability slug shown in the matrix cell
+  });
+  global.Actions['agents-model']({ model: 'llama3.2:1b' }); // collapse
+  global.Actions['agents-model']({ model: 'llama3.2:1b' }); // expand again
+  await check('re-expanding the model shows the saved assessment', () => {
+    const w4 = els['agents-matrix-wrap'].innerHTML;
+    assert(w4.includes('Assessments — llama3.2:1b') && w4.includes('verified in model view'));
+  });
+  global.Actions['agents-cell']({ model: 'llama3.2:1b', agent: '2' });
+  await check('re-opened editor pre-fills saved status/caps/note + Reset available', () => {
+    assert(modalOpen && modalHtml.includes('verified in model view'));
+    assert(modalHtml.includes('value="works" checked'));
+    assert(modalHtml.includes('Reset to untested'));
+  });
+  global.closeModal();
+
   // ---- add agent ----
   resetApi();
   global.document.querySelector = () => null;
@@ -270,6 +335,18 @@ def json_str(s: str) -> str:
     import json
 
     return json.dumps(s)
+
+
+def test_agents_model_view_has_collapse_control_and_clickable_rows():
+    """Regression for the manual UX findings: the model expansion must expose a
+    real Collapse control (button with data-action), and every assessment row
+    must open the cell editor — no plain-text "(click model again...)" hint."""
+    src = AGENTS_JS.read_text()
+    assert ">Collapse</button>" in src
+    assert "click model again to collapse" not in src
+    assert 'data-action="agents-model" data-model=' in src
+    assert 'class="mv-row" data-action="agents-cell"' in src
+    assert ">Edit</button>" in src
 
 
 def test_agents_page_uses_delegated_filter_actions():

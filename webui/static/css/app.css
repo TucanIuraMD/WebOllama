@@ -393,3 +393,8 @@ table.agents-matrix { border-collapse: separate; border-spacing: 0; font-size: 1
 .proc-row b { color: var(--text); font-weight: 500; }
 .proc-unavailable { color: var(--text-dim); font-size: 13px; padding: 10px 0 4px; }
 .proc-host { font-size: 11px; color: var(--text-faint); font-family: var(--mono); }
+
+/* ---- Agents model view: clickable assessment rows ---- */
+.mv-row { cursor: pointer; }
+.mv-row:hover { background: var(--bg-4); }
+.mv-edit { flex: none; margin-left: auto; }
