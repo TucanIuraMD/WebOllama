@@ -1,44 +1,38 @@
-"""Remote processor statistics collector — CPU/GPU of the OLLAMA server.
+"""Local processor statistics — CPU/GPU/Ollama of THE machine running WebOllama.
 
-WebOllama runs on one host (e.g. 192.168.80.111) while Ollama + the NVIDIA
-GPU(s) live on another (e.g. 192.168.80.22). This module fetches processor
-statistics from a minimal host-agent running THERE (no SSH, no root, no
-secrets, no Ollama API involvement).
+Architecture note (v2): WebOllama is designed to be deployed ON the Ollama
+server. The Dashboard PROCESSOR block therefore shows the LOCAL host's data:
 
-Endpoint contract (served by scripts/ollama22-host-agent.py):
-    GET {base}/api/processor ->
-    {
-      "host": "192.168.80.22",
-      "cpu":  {"utilization": 42.0, "cores_physical": 8, "cores_logical": 16,
-               "load": [3.2, 2.8, 2.4]},
-      "gpus": [{"index": 0, "name": "Tesla V100-SXM2-16GB", "utilization": 74.0,
-                "memory_used": 12400000000, "memory_total": 16160000000,
-                "memory_utilization": 46.0, "temperature": 64}],
-      "timestamp": "2026-09-06T14:00:00Z"
-    }
+- CPU / RAM  -> existing SystemCollector (psutil)  [webui/sys_collector.py]
+- GPU / VRAM -> existing GPUCollector (NVML primary, nvidia-smi fallback;
+               returns {"available": false} when no NVIDIA GPU is present)
+               [webui/gpu_collector.py]
+- Models     -> existing OllamaClient (/api/ps), i.e. the data behind
+               `ollama ps`. When the Ollama API is unreachable but the
+               `ollama` CLI exists, a local `ollama ps --format json`
+               fallback is used (same host, no SSH, no remote commands).
 
-Robustness contract mirrors gpu_collector.py:
-- unreachable host / bad status / malformed body -> {"available": false,
-  "reason": ...} and the last good payload as "last_good" (max 60s old);
-- one bad GPU field becomes None, never a crash, never fabricated values;
-- single-flight + short cache to protect the remote agent from per-second forks.
+Nothing here calls remote machines. When a piece is unavailable it degrades
+to a structured "unavailable" state — never a traceback, never fabricated
+values.
 """
+import asyncio
+import json
 import logging
+import shutil
 import time
-from typing import Optional
+from typing import Any, Optional
 
-import httpx
-
-from .config import PROCESSOR_URL, SYSINFO_URL
+from .gpu_collector import get_gpu_collector
+from .ollama_client import OllamaClient, OllamaError, get_client
+from .sys_collector import get_system_collector
 
 logger = logging.getLogger(__name__)
 
-LAST_GOOD_TTL = 60.0        # serve last good payload at most this long
-_WARN_INTERVAL = 30.0       # throttle repeated failure warnings
+CLI_TIMEOUT = 4.0  # seconds for the `ollama ps` CLI fallback
 
 
-def _num(value):
-    """Coerce to float or None — a single bad field must never crash."""
+def _f(value) -> Optional[float]:
     try:
         if value is None or isinstance(value, bool):
             return None
@@ -50,141 +44,164 @@ def _num(value):
 def _clean_gpu(raw: dict, i: int) -> dict:
     g = raw if isinstance(raw, dict) else {}
     name = g.get("name")
-    mu, mt = _num(g.get("memory_used")), _num(g.get("memory_total"))
+    mu, mt = _f(g.get("vram_used", g.get("memory_used"))), _f(g.get("vram_total", g.get("memory_total")))
+    util = _f(g.get("utilization"))
     return {
         "index": g.get("index", i),
         "name": str(name) if name else f"GPU {i}",
-        "utilization": _num(g.get("utilization")),
+        "utilization": util,
         "memory_used": mu,
         "memory_total": mt,
-        "memory_utilization": _num(g.get("memory_utilization"))
+        "memory_utilization": _f(g.get("memory_utilization"))
         or ((mu / mt * 100.0) if mu is not None and mt else None),
-        "temperature": _num(g.get("temperature")),
+        "temperature": _f(g.get("temperature")),
     }
 
 
-def _clean_cpu(raw) -> dict:
-    c = raw if isinstance(raw, dict) else {}
-    load = c.get("load") if isinstance(c.get("load"), (list, tuple)) else None
-    return {
-        "utilization": _num(c.get("utilization")),
-        "cores_physical": int(c["cores_physical"]) if _num(c.get("cores_physical")) is not None else None,
-        "cores_logical": int(c["cores_logical"]) if _num(c.get("cores_logical")) is not None else None,
-        "load": [_num(x) for x in load] if load else None,
-    }
+class ProcessorCollector:
+    """Aggregates local CPU + GPU + Ollama running models into one payload."""
 
-
-class RemoteProcessorCollector:
-    def __init__(self, base_url: str = "") -> None:
-        self.base_url = (base_url or PROCESSOR_URL or SYSINFO_URL or "").rstrip("/")
-        self._client: Optional[httpx.AsyncClient] = None
-        self._lock = None  # lazily created inside a running loop
+    def __init__(self, ollama: Optional[OllamaClient] = None,
+                 gpu: Optional[Any] = None, system: Optional[Any] = None) -> None:
+        self._ollama = ollama
+        self._gpu = gpu
+        self._system = system
+        self._lock: Optional[asyncio.Lock] = None
         self._cache: Optional[dict] = None
         self._cache_ts = 0.0
-        self._cache_ttl = 2.0   # poll guidance is 2-5s; cache below that
-        self._last_good: Optional[dict] = None
-        self._last_good_ts = 0.0
-        self._last_warn = 0.0
+        self._cache_ttl = 2.0  # poll guidance is 2-5s; cache below that
 
-    def _get_lock(self):
+    def _get_lock(self) -> asyncio.Lock:
         if self._lock is None:
-            import asyncio
-
             self._lock = asyncio.Lock()
         return self._lock
 
-    async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None or self._client.is_closed:
-            self._client = httpx.AsyncClient(
-                base_url=self.base_url or "http://invalid",
-                timeout=httpx.Timeout(2.5),
-            )
-        return self._client
+    # ---- collaborators -------------------------------------------------------
+    @property
+    def ollama(self) -> OllamaClient:
+        return self._ollama if self._ollama is not None else get_client()
 
-    async def aclose(self) -> None:
-        if self._client and not self._client.is_closed:
-            await self._client.aclose()
+    @property
+    def gpu(self):
+        return self._gpu if self._gpu is not None else get_gpu_collector()
 
-    def _warn_throttled(self, msg: str) -> None:
-        now = time.monotonic()
-        if now - self._last_warn >= _WARN_INTERVAL:
-            self._last_warn = now
-            logger.warning(msg)
+    @property
+    def system(self):
+        return self._system if self._system is not None else get_system_collector()
 
-    def _unavailable(self, reason: str) -> dict:
-        lg, lg_ts = self._last_good, self._last_good_ts
-        fresh = lg is not None and (time.time() - lg_ts) <= LAST_GOOD_TTL
-        out = {"available": False, "source": "remote", "configured": bool(self.base_url),
-               "reason": reason, "host": (lg or {}).get("host") or self.base_url,
-               "cpu": None, "gpus": [], "ts": time.time()}
-        if fresh:
-            out.update({"cpu": lg.get("cpu"), "gpus": lg.get("gpus", []),
-                        "stale": True, "stale_age": round(time.time() - lg_ts, 1),
-                        "last_good_ts": lg_ts})
-        return out
+    # ---- local ollama ps CLI fallback ----------------------------------------
+    async def _cli_ps(self) -> Optional[list]:
+        """`ollama ps --format json` on THIS host; None when unusable.
 
-    def _normalize(self, data) -> Optional[dict]:
-        if not isinstance(data, dict):
+        Used only when the Ollama HTTP API is unreachable while the CLI
+        exists locally — e.g. right after the project is moved to the
+        Ollama server and before the API is reachable.
+        """
+        if not shutil.which("ollama"):
             return None
-        cpu = _clean_cpu(data.get("cpu"))
-        raw_gpus = data.get("gpus")
-        if raw_gpus is None:
-            raw_gpus = []
-        if not isinstance(raw_gpus, list):
-            raw_gpus = []
-        host = data.get("host") or self.base_url
-        return {
-            "available": True,
-            "source": "remote",
-            "host": host,
-            "cpu": cpu,
-            "gpus": [_clean_gpu(g, i) for i, g in enumerate(raw_gpus)],
-            "timestamp": data.get("timestamp"),
-            "ts": time.time(),
-            "stale": False,
-        }
-
-    async def sample(self, force: bool = False) -> dict:
-        if not self.base_url:
-            return self._unavailable("remote processor source not configured (PROCESSOR_URL)")
-        async with self._get_lock():
-            now = time.time()
-            if not force and self._cache and (now - self._cache_ts) < self._cache_ttl:
-                return self._cache
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ollama", "ps", "--format", "json",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
             try:
-                client = await self._get_client()
-                resp = await client.get("/api/processor")
-                if resp.status_code != 200:
-                    out = self._unavailable(f"remote agent HTTP {resp.status_code}")
-                else:
-                    try:
-                        data = resp.json()
-                    except Exception:
-                        out = self._unavailable("remote agent returned malformed JSON")
-                    else:
-                        norm = self._normalize(data)
-                        if norm is None:
-                            out = self._unavailable("remote agent payload malformed")
-                        else:
-                            self._last_good, self._last_good_ts = norm, now
-                            out = norm
-            except (httpx.HTTPError, OSError) as exc:
-                out = self._unavailable(f"remote host unreachable: {type(exc).__name__}")
-            except Exception as exc:  # noqa: BLE001 — never break the caller
-                out = self._unavailable(f"remote processor error: {exc}")
-            if out.get("available"):
-                self._cache, self._cache_ts = out, now
+                out, _err = await asyncio.wait_for(proc.communicate(), timeout=CLI_TIMEOUT)
+            except asyncio.TimeoutError:
+                proc.kill()
+                return None
+            if proc.returncode != 0:
+                return None
+            data = json.loads(out.decode() or "[]")
+            rows = data if isinstance(data, list) else []
+            return rows if all(isinstance(r, dict) for r in rows) else None
+        except Exception:  # noqa: BLE001 — CLI fallback must never crash
+            return None
+
+    @staticmethod
+    def _models_from_ps(running: list) -> list:
+        """Map /api/ps (== `ollama ps`) rows into a compact model list."""
+        models = []
+        for m in running or []:
+            if not isinstance(m, dict):
+                continue
+            models.append({
+                "name": m.get("name") or m.get("model") or "unknown",
+                "size_vram": _f(m.get("size_vram")) or 0,
+                "size": _f(m.get("size")) or 0,
+            })
+        return models
+
+    # ---- main entry ----------------------------------------------------------
+    async def sample(self, force: bool = False) -> dict:
+        if self._cache is not None and not force and (time.time() - self._cache_ts) < self._cache_ttl:
+            return self._cache
+        async with self._get_lock():
+            if self._cache is not None and not force and (time.time() - self._cache_ts) < self._cache_ttl:
+                return self._cache
+            gpu_task = asyncio.create_task(self.gpu.sample())
+            sys_task = asyncio.create_task(self.system.sample())
+            gpu_data, sysdata = await asyncio.gather(gpu_task, sys_task)
+
+            # running models: prefer the Ollama API (same data as `ollama ps`);
+            # if the API is down, try the LOCAL `ollama ps` CLI once.
+            ollama_status = await self.ollama.status()
+            cli_used = False
+            if ollama_status.get("online"):
+                running = ollama_status.get("running", [])
             else:
-                self._cache, self._cache_ts = None, 0.0  # retry next call
-                self._warn_throttled(f"remote processor unavailable: {out.get('reason')}")
+                running = await self._cli_ps() or []
+                cli_used = bool(running)
+
+            vram_used = sum(m["size_vram"] for m in self._models_from_ps(running))
+            gpus = [_clean_gpu(g, i) for i, g in enumerate(gpu_data.get("gpus", []) or [])]
+            cpu_raw = sysdata.get("cpu", {}) or {}
+            load = cpu_raw.get("load") or [cpu_raw.get("load_1"), cpu_raw.get("load_5"), cpu_raw.get("load_15")]
+            load = [_f(x) for x in (list(load)[:3] if isinstance(load, (list, tuple)) else [])]
+            while len(load) < 3:
+                load.append(None)
+
+            out = {
+                "available": bool(gpu_data.get("available") or cpu_raw.get("percent") is not None or running),
+                "source": "local",
+                "host": sysdata.get("hostname") or "local",
+                "cpu": {
+                    "utilization": _f(cpu_raw.get("percent")),
+                    "cores_physical": cpu_raw.get("cores") or None,
+                    "cores_logical": cpu_raw.get("threads") or None,
+                    "load": load,
+                },
+                "gpus": gpus,
+                "gpu_available": bool(gpu_data.get("available")),
+                "gpu_reason": None if gpu_data.get("available") else (gpu_data.get("reason") or "no GPU data"),
+                "ollama": {
+                    "online": bool(ollama_status.get("online") or cli_used),
+                    "api_online": bool(ollama_status.get("online")),
+                    "cli_fallback_used": cli_used,
+                    "endpoint": ollama_status.get("endpoint") or "",
+                    "running_models": self._models_from_ps(running),
+                    "vram_used": vram_used or 0,
+                },
+                "ts": time.time(),
+            }
+            if not out["available"]:
+                bits = []
+                if not gpu_data.get("available"):
+                    bits.append(gpu_data.get("reason") or "GPU unavailable")
+                if cpu_raw.get("percent") is None:
+                    bits.append("CPU data unavailable")
+                if not (ollama_status.get("online") or running):
+                    bits.append("Ollama offline")
+                out["reason"] = "; ".join(bits) or "no processor data"
+            self._cache, self._cache_ts = out, time.time()
             return out
 
 
-_processor: Optional[RemoteProcessorCollector] = None
+_processor: Optional[ProcessorCollector] = None
 
 
-def get_remote_processor() -> RemoteProcessorCollector:
+def get_processor_collector() -> ProcessorCollector:
     global _processor
     if _processor is None:
-        _processor = RemoteProcessorCollector()
+        _processor = ProcessorCollector()
     return _processor

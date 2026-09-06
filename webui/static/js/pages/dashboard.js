@@ -171,7 +171,9 @@
   }
 
   // ------------------------------------------------------------------
-  // PROCESSOR — CPU/GPU of the remote Ollama host (e.g. 192.168.80.22).
+  // PROCESSOR — CPU/GPU/Ollama of the machine running WebOllama (after
+  // deployment that is the Ollama server itself). Data is collected
+  // locally: GPUCollector + SystemCollector + Ollama /api/ps (ollama ps).
   // Polls /api/system/processor every 3s while the Dashboard is visible;
   // structured failure -> friendly text, never a traceback.
   // ------------------------------------------------------------------
@@ -187,7 +189,7 @@
     const hostEl = document.getElementById("proc-host");
     if (!body) return;
     if (hostEl) hostEl.textContent = data && data.host ? String(data.host) : "";
-    if (!data || data.available !== true || (!data.cpu && !(data.gpus || []).length)) {
+    if (!data || data.available !== true) {
       body.classList.add("proc-unavailable");
       body.innerHTML = `Processor information unavailable` +
         (data && data.reason ? ` <span class="proc-host">— ${esc(String(data.reason))}</span>` : "");
@@ -196,6 +198,8 @@
     body.classList.remove("proc-unavailable");
     const cpu = data.cpu || {};
     const gpus = data.gpus || [];
+    const ollama = data.ollama || {};
+    const models = ollama.running_models || [];
     const load = fmtLoad(cpu.load);
     const cores = cpu.cores_logical ?? cpu.cores_physical ?? null;
     let html = `<div class="proc-grid">`;
@@ -208,11 +212,12 @@
         ${cpu.cores_physical != null && cpu.cores_logical != null ? `<div class="proc-row"><span>Physical / logical</span><b>${cpu.cores_physical} / ${cpu.cores_logical}</b></div>` : ""}
       </div>`;
     // One card per GPU (or a friendly note when the host has none)
-    if (!gpus.length) {
+    if (!data.gpu_available) {
       html += `
       <div class="proc-card">
         <div class="proc-title">GPU</div>
         <div class="proc-unavailable">GPU information unavailable</div>
+        ${data.gpu_reason ? `<div class="proc-host">${esc(String(data.gpu_reason))}</div>` : ""}
       </div>`;
     }
     for (const gpu of gpus) {
@@ -229,8 +234,19 @@
         <div class="proc-row"><span>Temperature</span><b>${gpu.temperature != null ? Number(gpu.temperature).toFixed(0) + "°C" : "NOT AVAILABLE"}</b></div>
       </div>`;
     }
+    // Ollama card — running models (the data behind `ollama ps`)
+    const modelsHtml = models.length
+      ? models.map((m) => `
+          <div class="proc-row"><span>${esc(m.name || "unknown")}</span><b>${m.size_vram != null ? fmtBytes(m.size_vram) : "—"}</b></div>`).join("")
+      : `<div class="proc-unavailable">${ollama.online ? "No models loaded" : "Ollama information unavailable"}</div>`;
+    html += `
+      <div class="proc-card">
+        <div class="proc-title">OLLAMA <span class="val">${models.length || ""}</span></div>
+        <div class="proc-sub">${ollama.cli_fallback_used ? "via ollama ps (CLI)" : "running models"}</div>
+        ${modelsHtml}
+        ${ollama.online && ollama.vram_used ? `<div class="proc-row"><span>Total VRAM in use</span><b>${fmtBytes(ollama.vram_used)}</b></div>` : ""}
+      </div>`;
     html += `</div>`;
-    if (data.stale) html += `<div class="proc-sub" style="margin-top:8px">showing last known values (${data.stale_age ?? "?"}s old)</div>`;
     body.innerHTML = html;
   }
 

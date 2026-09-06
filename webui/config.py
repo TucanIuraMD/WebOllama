@@ -58,9 +58,6 @@ def _str(name: str, default: str = "") -> str:
 OLLAMA_URL = _str("OLLAMA_URL", "http://127.0.0.1:11434").rstrip("/")
 # Optional remote sysinfo endpoint (e.g. a host agent exposing /gpu, /system)
 SYSINFO_URL = _str("SYSINFO_URL").rstrip("/")
-# Host-agent serving CPU/GPU stats of the remote OLLAMA server
-# (scripts/ollama22-host-agent.py). Falls back to SYSINFO_URL when unset.
-PROCESSOR_URL = _str("PROCESSOR_URL", SYSINFO_URL).rstrip("/")
 
 # ---- Server ----
 WEBUI_HOST = _str("WEBUI_HOST", "0.0.0.0")
