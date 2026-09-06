@@ -307,3 +307,76 @@ input[type=checkbox] { accent-color: var(--accent); width: 15px; height: 15px; c
   th { font-size: 10px; padding: 6px; }
   td { font-size: 12px; padding: 6px; }
 }
+
+/* ---- Agents page (Models × Agents matrix) ---- */
+.agents-head {
+  display: flex; align-items: center; justify-content: space-between;
+  flex-wrap: wrap; gap: 8px; padding: 12px 16px;
+}
+.agents-head .title { font-size: 18px; font-weight: 700; }
+.agents-head .sub { font-size: 12.5px; color: var(--text-dim); margin-top: 2px; }
+
+.agents-toolbar { display: flex; flex-direction: column; gap: 8px; padding: 10px 16px; }
+.agents-toolbar .filter-row { display: flex; align-items: flex-start; gap: 6px; flex-wrap: wrap; }
+.agents-toolbar .filter-label {
+  font-size: 12px; color: var(--text-faint); width: 90px; flex: none;
+  padding-top: 4px; text-align: right; text-transform: uppercase; letter-spacing: .4px;
+}
+.filter-chip {
+  padding: 3px 10px; font-size: 12px; border-radius: 12px;
+  background: var(--bg-3); border: 1px solid var(--border); color: var(--text-dim);
+  cursor: pointer; user-select: none; line-height: 1.5; white-space: nowrap;
+}
+.filter-chip:hover { border-color: var(--border-2); color: var(--text); }
+.filter-chip.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+.agents-legend { display: flex; gap: 14px; align-items: center; font-size: 12px; color: var(--text-dim); flex-wrap: wrap; }
+
+.agents-matrix-wrap {
+  overflow: auto; max-height: calc(100vh - 330px); min-height: 200px;
+  border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-2);
+}
+table.agents-matrix { border-collapse: separate; border-spacing: 0; font-size: 13px; }
+.agents-matrix th, .agents-matrix td { border-bottom: 1px solid var(--border); padding: 0; }
+.agents-matrix thead th {
+  position: sticky; top: 0; z-index: 3; background: var(--bg-2);
+  font-size: 12px; font-weight: 600; color: var(--text-dim); white-space: nowrap;
+  text-align: center; padding: 6px 8px; border-bottom: 1px solid var(--border-2);
+}
+.agents-matrix thead th.agent-col { border-left: 1px solid var(--border-2); min-width: 86px; }
+.agents-matrix thead th.agent-col.dim { color: var(--text-faint); font-weight: 400; }
+.agents-matrix td.agent-cell { border-left: 1px solid var(--border); text-align: center; }
+.agents-matrix .model-col {
+  position: sticky; left: 0; z-index: 2; background: var(--bg-2);
+  text-align: left; padding: 4px 10px; min-width: 230px; max-width: 340px;
+}
+.agents-matrix thead th.model-col { z-index: 4; text-align: left; }
+.agents-matrix tbody tr:hover td { background: var(--bg-3); }
+.agents-matrix .cell-btn {
+  display: block; width: 100%; min-height: 30px; padding: 4px 6px;
+  background: transparent; border: 1px solid transparent; border-radius: var(--radius-sm);
+  cursor: pointer; font-size: 13px; line-height: 1.3; color: inherit;
+}
+.agents-matrix .cell-btn:hover { background: var(--bg-4); border-color: var(--border-2); }
+.agents-matrix .model-name {
+  font-family: var(--mono); font-size: 12.5px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; display: block;
+}
+.agents-matrix .model-meta { font-size: 11px; color: var(--text-faint); }
+.st-untested { color: var(--text-faint); }
+.st-failed { color: var(--red); font-weight: 600; }
+.st-works { color: var(--green); font-weight: 600; }
+.st-good { color: var(--green); font-weight: 700; }
+.st-good .cell-cap, .st-works .cell-cap { color: var(--text-dim); font-weight: 400; }
+.cell-cap { display: block; font-size: 10px; color: var(--text-faint); line-height: 1.2; }
+
+/* model view + editor */
+.mv-row { display: flex; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--border); align-items: baseline; }
+.mv-row:last-child { border-bottom: none; }
+.mv-agent { width: 130px; flex: none; font-weight: 600; }
+.mv-status { width: 46px; flex: none; text-align: center; }
+.mv-caps { display: flex; gap: 4px; flex-wrap: wrap; }
+.mv-note { color: var(--text-dim); font-size: 12.5px; }
+.ed-status-row { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
+.ed-caps { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 4px 12px; margin: 8px 0 12px; }
+.ed-caps label { font-size: 13px; color: var(--text); display: flex; gap: 6px; align-items: center; }
