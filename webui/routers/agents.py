@@ -220,13 +220,19 @@ async def save_assessment(payload: dict, user: dict = Depends(require_user)):
         tested_at = None  # untested is not a test result
 
     cap_ids = await _resolve_capabilities(payload.get("capabilities"))
-    row = await db.upsert_assessment(
+    await db.upsert_assessment(
         model=model,
         agent_id=agent["id"],
         status=status,
         note=str(payload.get("note", "") or ""),
         capabilities=cap_ids,
         tested_at=tested_at,
+    )
+    # return the joined row (agent_name/slug + capabilities) — same shape as
+    # GET /api/agents/matrix assessments, so clients can patch in place
+    row = next(
+        (a for a in await db.list_assessments(model=model) if a["agent_id"] == agent["id"]),
+        None,
     )
     await get_audit().log(user["username"], "save_assessment", f"{model} @ {agent['slug']} -> {status}")
     return {"ok": True, "assessment": row}
