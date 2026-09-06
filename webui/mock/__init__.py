@@ -149,6 +149,61 @@ def make_mock_ollama_client(models=None, running=None) -> "OllamaClient":
 
 
 # --------------------------------------------------------------------------- #
+# Mock remote PROCESSOR source — a fake host-agent (GPU/CPU stats of a remote
+# machine, e.g. the Ollama server 192.168.80.22). Tests/dev only.
+# --------------------------------------------------------------------------- #
+class MockProcessorAgent:
+    """In-memory stand-in for the remote host-agent HTTP endpoint."""
+
+    def __init__(self, gpus=None, cpu=None, status=200, payload=None):
+        self.status = status
+        self.payload = payload if payload is not None else {
+            "host": "192.168.80.22",
+            "cpu": cpu or {
+                "utilization": 42.0,
+                "cores_physical": 8,
+                "cores_logical": 16,
+                "load": [3.2, 2.8, 2.4],
+            },
+            "gpus": [
+                {
+                    "index": 0,
+                    "name": "Tesla V100-SXM2-16GB",
+                    "utilization": 74.0,
+                    "memory_used": 12_400_000_000,
+                    "memory_total": 16_160_000_000,
+                    "memory_utilization": 46.0,
+                    "temperature": 64,
+                }
+            ] if gpus is None else gpus,
+            "timestamp": "2026-09-06T14:00:00Z",
+        }
+
+    def app(self):
+        from starlette.applications import Starlette
+        from starlette.responses import JSONResponse
+        from starlette.routing import Route
+
+        payload, status = self.payload, self.status
+
+        async def processor(request):
+            if status != 200:
+                return JSONResponse({"error": "boom"}, status_code=status)
+            return JSONResponse(payload)
+
+        return Starlette([Route("/api/processor", processor), Route("/api/processor/", processor)])
+
+    def transport(self) -> httpx.MockTransport:
+        def handler(request):
+            if self.status != 200:
+                return httpx.Response(self.status, json={"error": "boom"}, request=request)
+            return httpx.Response(200, json=self.payload, request=request)
+
+        return httpx.MockTransport(handler)
+
+
+
+# --------------------------------------------------------------------------- #
 # Mock GPU collector — returns a Tesla V100-like snapshot. Tests/dev only.
 # --------------------------------------------------------------------------- #
 class MockGPUCollector:

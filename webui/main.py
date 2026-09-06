@@ -26,6 +26,7 @@ from .routers import (
     llm as llm_router,
     logs as logs_router,
     ollama as ollama_router,
+    processor as processor_router,
     settings as settings_router,
     status as status_router,
     ws as ws_router,
@@ -151,6 +152,7 @@ async def index():
 
 app.include_router(auth_router.router)
 app.include_router(status_router.router)
+app.include_router(processor_router.router)
 app.include_router(ollama_router.router)
 app.include_router(agents_router.router)
 app.include_router(chat_router.router)
