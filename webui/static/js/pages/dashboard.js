@@ -43,6 +43,11 @@
         </div>
       </div>
 
+      <div class="card" style="margin-top:12px">
+        <div class="card-title">PROCESSOR <span class="right"><span class="proc-host" id="proc-host"></span></span></div>
+        <div id="proc-body" class="proc-unavailable">Loading…</div>
+      </div>
+
       <div class="grid grid-2">
         <div class="card">
           <div class="card-title">GPU ${g ? "· " + esc(g.name) : ""}</div>
@@ -162,7 +167,94 @@
     });
 
     loadHistory(60);
+    startProcessorPolling();
   }
+
+  // ------------------------------------------------------------------
+  // PROCESSOR — CPU/GPU of the remote Ollama host (e.g. 192.168.80.22).
+  // Polls /api/system/processor every 3s while the Dashboard is visible;
+  // structured failure -> friendly text, never a traceback.
+  // ------------------------------------------------------------------
+  let procTimer = null;
+
+  function fmtLoad(load) {
+    if (!load || !load.length) return null;
+    return load.map((x) => (x == null ? "—" : Number(x).toFixed(1))).join(" / ");
+  }
+
+  function renderProcessor(data) {
+    const body = document.getElementById("proc-body");
+    const hostEl = document.getElementById("proc-host");
+    if (!body) return;
+    if (hostEl) hostEl.textContent = data && data.host ? String(data.host) : "";
+    if (!data || data.available !== true || (!data.cpu && !(data.gpus || []).length)) {
+      body.classList.add("proc-unavailable");
+      body.innerHTML = `Processor information unavailable` +
+        (data && data.reason ? ` <span class="proc-host">— ${esc(String(data.reason))}</span>` : "");
+      return;
+    }
+    body.classList.remove("proc-unavailable");
+    const cpu = data.cpu || {};
+    const gpus = data.gpus || [];
+    const load = fmtLoad(cpu.load);
+    const cores = cpu.cores_logical ?? cpu.cores_physical ?? null;
+    let html = `<div class="proc-grid">`;
+    // CPU card
+    html += `
+      <div class="proc-card">
+        <div class="proc-title">CPU <span class="val">${cpu.utilization != null ? Number(cpu.utilization).toFixed(0) + "%" : "—"}</span></div>
+        <div class="gpu-bar proc-cpu-bar"><div class="bar"><div style="width:${cpu.utilization != null ? Math.max(0, Math.min(100, cpu.utilization)).toFixed(1) : 0}%;background:var(--accent)"></div></div></div>
+        <div class="proc-sub">Load ${load || "—"}${cores ? ` / ${cores} cores` : ""}</div>
+        ${cpu.cores_physical != null && cpu.cores_logical != null ? `<div class="proc-row"><span>Physical / logical</span><b>${cpu.cores_physical} / ${cpu.cores_logical}</b></div>` : ""}
+      </div>`;
+    // One card per GPU (or a friendly note when the host has none)
+    if (!gpus.length) {
+      html += `
+      <div class="proc-card">
+        <div class="proc-title">GPU</div>
+        <div class="proc-unavailable">GPU information unavailable</div>
+      </div>`;
+    }
+    for (const gpu of gpus) {
+      const used = gpu.memory_used, total = gpu.memory_total;
+      const pct = used != null && total ? (used / total) * 100 : null;
+      const memPct = gpu.memory_utilization != null ? gpu.memory_utilization : pct;
+      html += `
+      <div class="proc-card">
+        <div class="proc-title">${esc(gpu.name || "GPU")} <span class="proc-gpu-idx">#${gpu.index}</span></div>
+        <div class="proc-title" style="margin-bottom:2px"><span class="val">${gpu.utilization != null ? Number(gpu.utilization).toFixed(0) + "%" : "—"}</span></div>
+        <div class="gpu-bar" style="margin-top:6px"><div class="bar"><div style="width:${gpu.utilization != null ? Math.max(0, Math.min(100, gpu.utilization)).toFixed(1) : 0}%;background:var(--accent)"></div></div></div>
+        <div class="proc-sub">VRAM ${used != null ? fmtBytes(used) : "—"} / ${total != null ? fmtBytes(total) : "—"}${memPct != null ? ` (${Number(memPct).toFixed(0)}%)` : ""}</div>
+        <div class="gpu-bar" style="margin-top:4px"><div class="bar"><div style="width:${memPct != null ? Math.max(0, Math.min(100, memPct)).toFixed(1) : 0}%;background:var(--accent-2, var(--accent))"></div></div></div>
+        <div class="proc-row"><span>Temperature</span><b>${gpu.temperature != null ? Number(gpu.temperature).toFixed(0) + "°C" : "NOT AVAILABLE"}</b></div>
+      </div>`;
+    }
+    html += `</div>`;
+    if (data.stale) html += `<div class="proc-sub" style="margin-top:8px">showing last known values (${data.stale_age ?? "?"}s old)</div>`;
+    body.innerHTML = html;
+  }
+
+  async function refreshProcessor() {
+    if (App.state.currentPage !== "dashboard") return;
+    try {
+      renderProcessor(await API.get("/api/system/processor"));
+    } catch (e) {
+      // network/auth failure: keep whatever is shown, degrade quietly
+      const body = document.getElementById("proc-body");
+      if (body && !body.innerHTML) {
+        body.classList.add("proc-unavailable");
+        body.textContent = "Processor information unavailable";
+      }
+    }
+  }
+
+  function startProcessorPolling() {
+    refreshProcessor();
+    if (procTimer) clearInterval(procTimer);
+    procTimer = setInterval(refreshProcessor, 3000);
+  }
+
+  window.addEventListener("beforeunload", () => { if (procTimer) clearInterval(procTimer); });
 
   async function loadHistory(minutes) {
     try {
