@@ -111,6 +111,24 @@ class MockOllama:
             if path == "/api/chat":
                 if not any(m["name"] == body.get("model") for m in self.models):
                     return httpx.Response(404, json={"error": "model not found"})
+                if body.get("stream"):
+                    # NDJSON: incremental token chunks, then a final done line
+                    # carrying the timing/eval counters (mirrors real Ollama).
+                    chunks = ["mock ", "chat ", "reply"]
+                    lines = [
+                        json.dumps({"model": body.get("model", ""), "done": False,
+                                    "message": {"role": "assistant", "content": c}})
+                        for c in chunks
+                    ]
+                    lines.append(json.dumps({
+                        "model": body.get("model", ""),
+                        "done": True,
+                        "message": {"role": "assistant", "content": ""},
+                        "total_duration": 1_234_567,
+                        "prompt_eval_count": 5,
+                        "eval_count": 3,
+                    }))
+                    return httpx.Response(200, text="\n".join(lines) + "\n")
                 return httpx.Response(200, json={
                     "model": body.get("model", ""),
                     "done": True,

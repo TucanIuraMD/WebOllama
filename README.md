@@ -32,6 +32,11 @@ Real screenshots go in [`docs/images/`](docs/images/) and are referenced here. *
 - All long operations (pull, push, create, delete, copy, stop) run as async Jobs
 - Live progress over WebSocket, persisted to SQLite (survive restart), cancellable
 
+### Chat
+- Streaming conversation with any Ollama model (SSE: tokens appear as they are generated)
+- Multi-turn history kept in state, Stop button (AbortController), generation cursor
+- Completion metrics: model, generated tokens, duration; in-transcript error rendering
+
 ### Agents
 - Practical knowledge base: **which model actually works in which environment/agent**
   (Hermes, OpenCode, Claude, OpenWebUI — extensible at runtime)

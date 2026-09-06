@@ -104,6 +104,20 @@ while Ollama is offline.
 | PUT | `/api/llm/{id}` | Admin | Update an endpoint |
 | DELETE | `/api/llm/{id}` | Admin | Delete an endpoint |
 
+### Chat
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/api/chat/run` | Yes | Single-shot completion → JSON `{message, model, eval_count, ...}` |
+| POST | `/api/chat/stream` | Yes | Streaming completion (SSE): `delta` chunks → `done` with metrics, or `error` |
+
+`POST /api/chat/stream` body: `{"model": "...", "messages": [{"role", "content"}, ...],
+"options": {...}?}`. Response is `text/event-stream` with events
+`event: delta` (`{"content": "..."}`), `event: done` (model +
+`total_duration`/`prompt_eval_count`/`eval_count`), `event: error`
+(`{"error": "..."}`). HTTP-level errors (400/401) use the standard
+`{"detail": "..."}` envelope.
+
 ### Logs
 
 | Method | Path | Auth | Description |

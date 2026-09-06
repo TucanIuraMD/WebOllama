@@ -224,6 +224,13 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
 .terminal-input .prompt { color: var(--accent); font-family: var(--mono); padding: 7px 0; }
 .terminal-input input { flex: 1; font-family: var(--mono); }
 
+/* ---- Chat v2 (streaming) ---- */
+.chat-cursor {
+  display: inline-block; color: var(--accent); font-family: var(--mono);
+  animation: chat-blink 1s steps(2, start) infinite;
+}
+@keyframes chat-blink { to { visibility: hidden; } }
+
 /* ---- Logs ---- */
 .log-view {
   background: #05070b; border: 1px solid var(--border); border-radius: 8px;

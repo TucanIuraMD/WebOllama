@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.1.0 (2026-09-06)
+
+### Features
+
+- **Chat v2** — streaming chat UI: tokens render incrementally via the new
+  `POST /api/chat/stream` SSE endpoint (Ollama NDJSON → SSE proxy),
+  Send ↔ Stop toggle (AbortController), conversation history kept in state,
+  generation cursor, in-transcript error rendering, completion metrics
+  (model / tokens / duration), Clear button. `POST /api/chat/run` kept for
+  compatibility. See `docs/CHAT-UI-V2.md`.
+
 ## 1.0.0 (2026-08-28)
 
 Initial release.

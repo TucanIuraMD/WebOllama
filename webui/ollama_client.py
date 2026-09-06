@@ -5,6 +5,7 @@ offline state and raises OllamaError with a stable error code so the UI
 can render "OLLAMA OFFLINE" instead of hanging.
 """
 import asyncio
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Any, AsyncIterator, Callable, Optional
@@ -126,6 +127,46 @@ class OllamaClient:
             {"model": model, "messages": messages, "stream": stream},
         )
 
+    async def chat_stream(
+        self,
+        model: str,
+        messages: list[dict],
+        options: dict | None = None,
+        cancel_event: asyncio.Event | None = None,
+    ):
+        """Stream /api/chat NDJSON tokens as parsed dicts until done=true.
+
+        Ollama emits one JSON object per line; with stream=True each line
+        carries an incremental message chunk, the final line has done=true
+        plus timing/eval counters. Raises OllamaError offline/HTTP errors.
+        """
+        client = await self._get_client()
+        payload: dict = {"model": model, "messages": messages, "stream": True}
+        if options:
+            payload["options"] = options
+        try:
+            async with client.stream("POST", "/api/chat", json=payload) as resp:
+                if resp.status_code >= 400:
+                    body = (await resp.aread()).decode(errors="replace")
+                    raise OllamaError(body or f"HTTP {resp.status_code}", code=resp.status_code)
+                async for line in resp.aiter_lines():
+                    if cancel_event is not None and cancel_event.is_set():
+                        logger.info("Chat stream cancelled (client disconnect)")
+                        return
+                    if not line.strip():
+                        continue
+                    try:
+                        evt = json.loads(line)
+                    except ValueError:
+                        continue
+                    yield evt
+        except OllamaError:
+            raise
+        except httpx.ConnectError as exc:
+            raise OllamaError("Ollama is offline", offline=True) from exc
+        except httpx.HTTPError as exc:
+            raise OllamaError(f"Stream failed: {exc}", code=502) from exc
+
     async def generate(self, model: str, prompt: str, stream: bool = False) -> Any:
         return await self._request(
             "POST", "/api/generate",
@@ -234,8 +275,6 @@ class OllamaClient:
 
 
 def _parse_progress(line: str) -> ProgressEvent:
-    import json
-
     obj = json.loads(line)
     evt = ProgressEvent(
         status=obj.get("status", ""),
