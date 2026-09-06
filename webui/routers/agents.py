@@ -79,10 +79,17 @@ async def create_agent(payload: dict, user: dict = Depends(require_user)):
         raise HTTPException(400, "agent slug required")
     if await _db().get_agent_by_slug(slug):
         raise HTTPException(400, f"agent slug already exists: {slug}")
-    agent = await _db().create_agent(
-        name, slug, str(payload.get("description", "")).strip(),
-        bool(payload.get("enabled", True)),
-    )
+    agent = None
+    try:
+        agent = await _db().create_agent(
+            name, slug, str(payload.get("description", "")).strip(),
+            bool(payload.get("enabled", True)),
+        )
+    except Exception as exc:
+        # name/slug have UNIQUE constraints — surface as a normal 400
+        if "UNIQUE constraint failed" in str(exc):
+            raise HTTPException(400, f"agent name or slug already exists: {name!r}")
+        raise
     await get_audit().log(user["username"], "create_agent", slug)
     return {"ok": True, "agent": agent}
 
@@ -100,9 +107,16 @@ async def create_capability(payload: dict, user: dict = Depends(require_user)):
         raise HTTPException(400, "capability slug required")
     if any(c["slug"] == slug for c in await _db().list_capabilities()):
         raise HTTPException(400, f"capability slug already exists: {slug}")
-    cap = await _db().create_capability(
-        name, slug, str(payload.get("description", "")).strip()
-    )
+    cap = None
+    try:
+        cap = await _db().create_capability(
+            name, slug, str(payload.get("description", "")).strip()
+        )
+    except Exception as exc:
+        # name/slug have UNIQUE constraints — surface as a normal 400
+        if "UNIQUE constraint failed" in str(exc):
+            raise HTTPException(400, f"capability name or slug already exists: {name!r}")
+        raise
     await get_audit().log(user["username"], "create_capability", slug)
     return {"ok": True, "capability": cap}
 

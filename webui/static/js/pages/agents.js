@@ -1,7 +1,11 @@
 /* Agents page — practical Models × Agents knowledge base.
    Matrix of real Ollama models (rows) × configured agents (columns).
    Each cell is a human-verified assessment: status, capabilities, note.
-   This is NOT a benchmark: nothing is scored or auto-filled here. */
+   This is NOT a benchmark: nothing is scored or auto-filled here.
+
+   Admins can add new agents/capabilities at runtime (SQLite rows via
+   POST /api/agents/agents and /api/agents/capabilities) — no restart,
+   no hardcoded lists. */
 (function () {
   "use strict";
 
@@ -16,6 +20,10 @@
   let assessIdx = {};       // "model\u0000agent_id" -> assessment
   let filters = { search: "", agent: "", capability: "", status: "" };
   let expandedModels = new Set(); // row-expansion => model view (per-agent detail)
+
+  function isAdmin() {
+    return !!(App.state.user && App.state.user.role === "admin");
+  }
 
   function idxKey(model, agentId) { return model + "\u0000" + agentId; }
 
@@ -61,6 +69,11 @@
         </div>
       </div>
       <div class="card agents-toolbar">
+        <div class="filter-row" id="agents-admin-row" style="display:none">
+          <span class="filter-label">&nbsp;</span>
+          <button class="btn btn-sm btn-primary" data-action="agents-add">+ Add Agent</button>
+          <button class="btn btn-sm" data-action="agents-add-cap">+ Add Capability</button>
+        </div>
         <div class="filter-row">
           <span class="filter-label">Search</span>
           <input type="text" id="agents-search" placeholder="Search model name…" style="flex:1;min-width:180px" value="${esc(filters.search)}" />
@@ -74,7 +87,7 @@
 
   function chip(row, value, label, group, cls) {
     const active = filters[group] === value ? " active" : "";
-    return `<span class="filter-chip${cls ? " " + cls : ""}${active}" data-group="${group}" data-value="${esc(value)}">${label}</span>`;
+    return `<span class="filter-chip${cls ? " " + cls : ""}${active}" data-action="agents-filter" data-group="${group}" data-value="${esc(value)}">${label}</span>`;
   }
 
   function drawFilters() {
@@ -113,20 +126,18 @@
         drawMatrix();
       }, 200);
     };
-    document.querySelectorAll(".filter-chip").forEach((c) => {
-      c.onclick = () => {
-        const g = c.dataset.group, v = c.dataset.value;
-        filters[g] = filters[g] === v ? "" : v;
-        drawFilters();
-        drawMatrix();
-      };
-    });
     const st = document.getElementById("agents-ollama-state");
     if (st) {
       st.innerHTML = data.ollama_online
         ? '<span style="color:var(--green)">● Ollama online</span>'
         : '<span style="color:var(--red)">● Ollama offline — list may be stale</span>';
     }
+    // admin-only config controls
+    const adminRow = document.getElementById("agents-admin-row");
+    if (adminRow) adminRow.style.display = isAdmin() ? "flex" : "none";
+    // NOTE: drawFilters() must run BEFORE any chip binding — filter chips use
+    // the global data-action delegation (window.Actions.agents-filter), so
+    // they stay clickable no matter how often they are re-rendered.
     drawFilters();
   }
 
@@ -280,6 +291,7 @@
       <div class="form-row"><label>Tested at</label>
         <input type="text" readonly value="${a && a.tested_at ? new Date(a.tested_at * 1000).toLocaleString() : "will be set automatically on save"}" />
       </div>
+      <div id="ed-error" class="alert error" style="display:none"></div>
       <div class="toolbar">
         ${a ? '<button class="btn btn-danger btn-sm" onclick="AgentsPage.resetCell()">↺ Reset to untested</button>' : ""}
         <span style="flex:1"></span>
@@ -309,7 +321,6 @@
       });
       // update local state without a full page reload
       const a = res.assessment;
-      a.capabilities = (data.capabilities || []).filter((c) => capabilities.includes(c.id));
       data.assessments = (data.assessments || []).filter(
         (x) => !(x.model === a.model && x.agent_id === a.agent_id)
       );
@@ -320,7 +331,7 @@
       drawMatrix();
       toast("Assessment saved", "success");
     } catch (e) {
-      toast("Save failed: " + e.message, "error");
+      showFormError("ed-error", e);
     }
   }
 
@@ -337,13 +348,119 @@
       drawMatrix();
       toast("Assessment reset to untested", "success");
     } catch (e) {
-      toast("Reset failed: " + e.message, "error");
+      showFormError("ed-error", e);
+    }
+  }
+
+  // ---- admin config: add agent / capability -------------------------------------
+  function slugify(name) {
+    // mirrors the server-side _slugify fallback
+    return name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  }
+
+  function showFormError(id, e) {
+    const el = document.getElementById(id);
+    if (el) {
+      el.textContent = e.message || String(e);
+      el.style.display = "block";
+    }
+    toast((e.message || String(e)), "error");
+  }
+
+  function openAgentForm() {
+    openModal(`
+      <div class="form-row"><label>Name *</label><input type="text" id="af-name" placeholder="e.g. Automation" autofocus /></div>
+      <div class="form-row"><label>Slug</label><input type="text" id="af-slug" placeholder="auto from name" /><div class="text-faint" style="font-size:11px;margin-top:2px">optional — generated from the name if left empty</div></div>
+      <div class="form-row"><label>Description</label><input type="text" id="af-desc" placeholder="what this environment is for" /></div>
+      <div class="form-row"><label>Enabled</label>
+        <label style="display:flex;gap:6px;align-items:center;font-size:13px"><input type="checkbox" id="af-enabled" checked /> show as a matrix column</label>
+      </div>
+      <div id="af-error" class="alert error" style="display:none"></div>
+      <div class="toolbar">
+        <span style="flex:1"></span>
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="AgentsPage.submitAgent()">Save</button>
+      </div>
+    `, { title: "🤖 Add Agent", width: "480px" });
+
+    const nameEl = document.getElementById("af-name");
+    const slugEl = document.getElementById("af-slug");
+    let slugTouched = false;
+    slugEl.oninput = () => { slugTouched = slugEl.value.trim() !== ""; };
+    nameEl.oninput = () => {
+      if (!slugTouched) slugEl.value = slugify(nameEl.value);
+    };
+    nameEl.focus();
+  }
+
+  async function submitAgent() {
+    const name = document.getElementById("af-name").value.trim();
+    const payload = {
+      name,
+      slug: document.getElementById("af-slug").value.trim(),
+      description: document.getElementById("af-desc").value.trim(),
+      enabled: document.getElementById("af-enabled").checked,
+    };
+    if (!name) { showFormError("af-error", { message: "agent name required" }); return; }
+    try {
+      const res = await API.post("/api/agents/agents", payload);
+      data.agents.push(res.agent);
+      data.counts.agents = (data.counts.agents || 0) + 1;
+      closeModal();
+      drawFilters();
+      drawMatrix();
+      toast(`Agent "${res.agent.name}" added`, "success");
+    } catch (e) {
+      showFormError("af-error", e);
+    }
+  }
+
+  function openCapabilityForm() {
+    openModal(`
+      <div class="form-row"><label>Name *</label><input type="text" id="cf-name" placeholder="e.g. OCR" autofocus /></div>
+      <div class="form-row"><label>Slug</label><input type="text" id="cf-slug" placeholder="auto from name" /><div class="text-faint" style="font-size:11px;margin-top:2px">optional — generated from the name if left empty</div></div>
+      <div class="form-row"><label>Description</label><input type="text" id="cf-desc" placeholder="what this capability means" /></div>
+      <div id="cf-error" class="alert error" style="display:none"></div>
+      <div class="toolbar">
+        <span style="flex:1"></span>
+        <button class="btn" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="AgentsPage.submitCapability()">Save</button>
+      </div>
+    `, { title: "🧩 Add Capability", width: "480px" });
+
+    const nameEl = document.getElementById("cf-name");
+    const slugEl = document.getElementById("cf-slug");
+    let slugTouched = false;
+    slugEl.oninput = () => { slugTouched = slugEl.value.trim() !== ""; };
+    nameEl.oninput = () => {
+      if (!slugTouched) slugEl.value = slugify(nameEl.value);
+    };
+    nameEl.focus();
+  }
+
+  async function submitCapability() {
+    const name = document.getElementById("cf-name").value.trim();
+    const payload = {
+      name,
+      slug: document.getElementById("cf-slug").value.trim(),
+      description: document.getElementById("cf-desc").value.trim(),
+    };
+    if (!name) { showFormError("cf-error", { message: "capability name required" }); return; }
+    try {
+      const res = await API.post("/api/agents/capabilities", payload);
+      data.capabilities.push(res.capability);
+      closeModal();
+      drawFilters();
+      drawMatrix();
+      toast(`Capability "${res.capability.name}" added`, "success");
+    } catch (e) {
+      showFormError("cf-error", e);
     }
   }
 
   // ---- actions (data-action hooks used across the page) ------------------------
   window.AgentsPage = {
-    saveCell, resetCell,
+    saveCell, resetCell, submitAgent, submitCapability,
     _editing: null,
   };
 
@@ -355,6 +472,20 @@
       if (expandedModels.has(name)) expandedModels.delete(name);
       else expandedModels.add(name);
       drawMatrix();
+    };
+    window.Actions["agents-filter"] = (ds) => {
+      const g = ds.group, v = ds.value;
+      filters[g] = filters[g] === v ? "" : v;
+      drawFilters();
+      drawMatrix();
+    };
+    window.Actions["agents-add"] = () => {
+      if (!isAdmin()) return;
+      openAgentForm();
+    };
+    window.Actions["agents-add-cap"] = () => {
+      if (!isAdmin()) return;
+      openCapabilityForm();
     };
   }
   setupActions();
