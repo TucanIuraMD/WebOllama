@@ -7,6 +7,9 @@ local `ollama ps --format json` CLI fallback). Tests use ONLY mock collectors
 and fixture payloads — no real hardware, no real Ollama, no network, and no
 access to any remote machine (e.g. 192.168.80.22).
 """
+import json
+import time
+
 import pytest
 
 import webui.remote_sys as rs
@@ -38,7 +41,15 @@ class _Stub:
         self.__dict__.update(kwargs)
 
 
-def make_collector(gpu_data=None, sys_data=None, ollama_status=None, cli_rows=None, cli_ok=False):
+def make_collector(gpu_data=None, sys_data=None, ollama_status=None, cli_rows=None, cli_ok=False,
+                   shared_snapshot="none"):
+    """Build a ProcessorCollector with stubbed collaborators.
+
+    shared_snapshot: the value returned by _realtime_snapshot(). Default "none"
+    disables the shared-realtime path so the stubs below are exercised (the
+    2nd-priority own-collection path). Pass a dict to simulate a fresh realtime
+    snapshot (the 1st-priority path shared with the Dashboard GPU block).
+    """
     c = ProcessorCollector()
 
     async def gpu_sample():
@@ -54,8 +65,12 @@ def make_collector(gpu_data=None, sys_data=None, ollama_status=None, cli_rows=No
         return cli_rows if cli_ok else None
 
     c._gpu, c._system, c._ollama = _Stub(sample=gpu_sample), _Stub(sample=sys_sample), _Stub(status=status, _cli_ps=cli_ps)
-    # patch the CLI fallback at the instance level for determinism
+    # patch the CLI fallback and the shared-snapshot source at instance level for determinism
     c._cli_ps = cli_ps  # type: ignore[method-assign]
+    if shared_snapshot == "none":
+        c._realtime_snapshot = lambda: None  # type: ignore[method-assign]
+    else:
+        c._realtime_snapshot = lambda: shared_snapshot  # type: ignore[method-assign]
     return c
 
 
@@ -243,6 +258,174 @@ async def test_cli_ps_rejects_bad_output(monkeypatch):
 
     monkeypatch.setattr(rs.shutil, "which", FakeShutil.which)
     assert await c._cli_ps() is None  # no ollama CLI -> None, no exception
+
+
+# --------------------------------------------------------------------------- #
+# GPU telemetry synchronization — PROCESSOR vs the Dashboard GPU block
+#
+# Incident (real 192.168.80.22): PROCESSOR showed util 9% / VRAM 15.4/16 GB /
+# 45°C, the Dashboard GPU block showed 0% / 550 MB / 44°C at the same moment.
+# Root cause: the two blocks built their payloads at different times through
+# different paths. Fix: PROCESSOR reuses the realtime service's CURRENT
+# snapshot — the same object the GPU block renders — so they cannot diverge.
+# These tests pin the consistency across the whole path, not just the collector.
+# --------------------------------------------------------------------------- #
+
+SNAP_GPU_FRESH = {
+    "available": True, "source": "test", "ts": None,  # ts set per test
+    "gpus": [{
+        "index": 0, "name": "Tesla V100-SXM2-16GB", "utilization": 9,
+        "temperature": 45, "vram_total": 16_160_000_000,
+        "vram_used": 15_400_000_000, "memory_utilization": 95,
+    }],
+    "processes": [],
+}
+SNAP_FRESH = {
+    "ts": None,
+    "gpu": dict(SNAP_GPU_FRESH),
+    "cpu": {"percent": 41.5, "cores": 8, "threads": 16, "load": [3.2, 2.8, 2.4]},
+    "system": {"hostname": "ollama-server"},
+    "ollama": {"online": True, "endpoint": "http://127.0.0.1:11434",
+               "running": [{"name": "devstral-24b:latest", "size_vram": 13_500_000_000, "size": 14_000_000_000}]},
+}
+
+
+def _fresh_snap():
+    snap = json.loads(json.dumps(SNAP_FRESH))  # deep copy, fresh object each test
+    snap["ts"] = snap["gpu"]["ts"] = time.time()
+    return snap
+
+
+@pytest.mark.asyncio
+async def test_processor_matches_dashboard_gpu_block(client):
+    _login(client)
+    """PROCESSOR must show EXACTLY what the Dashboard GPU block shows."""
+    snap = _fresh_snap()
+    rs._processor = make_collector(GPU_OK, SYS_OK, OLLAMA_OK, shared_snapshot=snap)
+    data = client.get("/api/system/processor").json()
+    g = snap["gpu"]["gpus"][0]
+    assert data["gpus"][0]["utilization"] == g["utilization"]
+    assert data["gpus"][0]["memory_used"] == g["vram_used"]
+    assert data["gpus"][0]["memory_total"] == g["vram_total"]
+    assert data["gpus"][0]["temperature"] == g["temperature"]
+
+
+@pytest.mark.asyncio
+async def test_vram_not_replaced_by_ollama_model_vram(client):
+    _login(client)
+    """GPU VRAM is the NVML/nvidia-smi number — never the ollama model size."""
+    snap = _fresh_snap()
+    snap["gpu"]["gpus"][0]["vram_used"] = 15_400_000_000
+    snap["ollama"]["running"] = [{"name": "devstral-24b:latest", "size_vram": 13_500_000_000, "size": 14_000_000_000}]
+    rs._processor = make_collector(GPU_OK, SYS_OK, OLLAMA_OK, shared_snapshot=snap)
+    data = client.get("/api/system/processor").json()
+    assert data["gpus"][0]["memory_used"] == 15_400_000_000           # GPU VRAM
+    assert data["ollama"]["vram_used"] == 13_500_000_000              # model VRAM, separate
+    assert data["ollama"]["running_models"][0]["name"] == "devstral-24b:latest"
+
+
+class _FakeRT:
+    def __init__(self, snap):
+        self.last_snapshot = snap
+
+
+@pytest.mark.asyncio
+async def test_stale_realtime_snapshot_not_used(client, monkeypatch):
+    _login(client)
+    """A stalled realtime loop must not leak old GPU numbers into PROCESSOR.
+
+    Exercises the REAL _realtime_snapshot() freshness check (not a stub):
+    the stale service snapshot is rejected and PROCESSOR collects fresh data.
+    """
+    snap = _fresh_snap()
+    snap["gpu"]["gpus"][0]["utilization"] = 75   # old values (the v1 incident)
+    snap["gpu"]["gpus"][0]["temperature"] = 55
+    snap["ts"] = snap["gpu"]["ts"] = time.time() - 3600   # one hour old
+    import webui.realtime as rt_mod
+    monkeypatch.setattr(rt_mod, "get_realtime_service", lambda: _FakeRT(snap))
+    collector = make_collector(GPU_OK, SYS_OK, OLLAMA_OK)
+    # restore the REAL freshness-checking method (make_collector stubbed it)
+    collector._realtime_snapshot = ProcessorCollector._realtime_snapshot.__get__(collector)  # type: ignore[method-assign]
+    rs._processor = collector
+    data = client.get("/api/system/processor").json()
+    assert data["gpus"][0]["utilization"] == 74.0          # from OWN fresh collection
+    assert data["gpus"][0]["temperature"] == 64            # not the stale 55
+    assert data["telemetry_source"] == "own-collection"    # prove the fresh path
+
+
+@pytest.mark.asyncio
+async def test_no_snapshot_falls_back_to_own_collection(client):
+    _login(client)
+    """Realtime absent (early startup) -> fresh own collection, no crash."""
+    collector = make_collector(GPU_OK, SYS_OK, OLLAMA_OK)   # snapshot path disabled
+    rs._processor = collector
+    data = client.get("/api/system/processor").json()
+    assert data["telemetry_source"] == "own-collection"
+    assert data["gpus"][0]["utilization"] == 74.0
+    assert data["ollama"]["running_models"][0]["name"] == "deepseek-coder-v2:latest"
+
+
+@pytest.mark.asyncio
+async def test_multi_gpu_consistent_between_blocks(client):
+    _login(client)
+    """All GPUs flow through the shared snapshot with per-index fidelity."""
+    snap = _fresh_snap()
+    snap["gpu"]["gpus"] = [
+        {"index": 0, "name": "GPU0", "utilization": 5, "temperature": 44,
+         "vram_total": 16_160_000_000, "vram_used": 550_000_000},
+        {"index": 1, "name": "GPU1", "utilization": 97, "temperature": 70,
+         "vram_total": 16_160_000_000, "vram_used": 15_900_000_000},
+    ]
+    rs._processor = make_collector(GPU_OK, SYS_OK, OLLAMA_OK, shared_snapshot=snap)
+    data = client.get("/api/system/processor").json()
+    assert [g["index"] for g in data["gpus"]] == [0, 1]
+    assert data["gpus"][0]["utilization"] == 5 and data["gpus"][1]["utilization"] == 97
+    assert data["gpus"][0]["memory_used"] == 550_000_000 and data["gpus"][1]["memory_used"] == 15_900_000_000
+    assert data["gpus"][0]["temperature"] == 44 and data["gpus"][1]["temperature"] == 70
+
+
+@pytest.mark.asyncio
+async def test_realtime_snapshot_and_api_status_share_gpu_object(client, monkeypatch):
+    _login(client)
+    """The path-to-Dashboard guarantee: the snapshot /api/status serves is the
+    same snapshot PROCESSOR consumed — GPU numbers identical by construction."""
+    import webui.realtime as rt_mod
+    import webui.routers.status as status_mod
+    snap = _fresh_snap()
+    fake = _FakeRT(snap)
+    # the status router binds get_realtime_service statically at import time
+    monkeypatch.setattr(rt_mod, "get_realtime_service", lambda: fake)
+    monkeypatch.setattr(status_mod, "get_realtime_service", lambda: fake)
+    collector = make_collector(GPU_OK, SYS_OK, OLLAMA_OK)
+    collector._realtime_snapshot = ProcessorCollector._realtime_snapshot.__get__(collector)  # type: ignore[method-assign]
+    rs._processor = collector
+    proc_gpu = client.get("/api/system/processor").json()["gpus"][0]
+    status_gpu = client.get("/api/status").json()["gpu"]["gpus"][0]
+    assert proc_gpu["utilization"] == status_gpu["utilization"] == 9
+    assert proc_gpu["memory_used"] == status_gpu["vram_used"] == 15_400_000_000
+    assert proc_gpu["temperature"] == status_gpu["temperature"] == 45
+
+
+@pytest.mark.asyncio
+async def test_dashboard_gpu_tile_uses_fresh_shared_source(client, monkeypatch):
+    _login(client)
+    """Path check: /api/status GPU numbers equal PROCESSOR GPU numbers when the
+    realtime service holds a CURRENT snapshot (no stale window)."""
+    import webui.realtime as rt_mod
+    import webui.routers.status as status_mod
+    snap = _fresh_snap()
+    fake = _FakeRT(snap)
+    monkeypatch.setattr(rt_mod, "get_realtime_service", lambda: fake)
+    monkeypatch.setattr(status_mod, "get_realtime_service", lambda: fake)
+    collector = make_collector(GPU_OK, SYS_OK, OLLAMA_OK)
+    collector._realtime_snapshot = ProcessorCollector._realtime_snapshot.__get__(collector)  # type: ignore[method-assign]
+    rs._processor = collector
+    p = client.get("/api/system/processor").json()
+    st = client.get("/api/status").json()
+    assert p["telemetry_source"] == "realtime-snapshot"
+    assert p["gpus"][0]["utilization"] == st["gpu"]["gpus"][0]["utilization"] == 9
+    assert p["gpus"][0]["memory_used"] == st["gpu"]["gpus"][0]["vram_used"] == 15_400_000_000
+    assert p["gpus"][0]["temperature"] == st["gpu"]["gpus"][0]["temperature"] == 45
 
 
 @pytest.mark.asyncio

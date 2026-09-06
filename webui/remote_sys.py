@@ -12,6 +12,15 @@ server. The Dashboard PROCESSOR block therefore shows the LOCAL host's data:
                `ollama` CLI exists, a local `ollama ps --format json`
                fallback is used (same host, no SSH, no remote commands).
 
+GPU telemetry synchronization: PROCESSOR does NOT sample the GPU
+independently. Its first-priority source is the realtime service's
+CURRENT snapshot (last_snapshot, fresh within REFRESH_INTERVAL * 2) —
+the same object the Dashboard's existing GPU block renders via
+WebSocket / /api/status. Only when that snapshot is absent or stale
+(e.g. right after startup, or a stalled realtime loop) does PROCESSOR
+run its own GPUCollector sample ("own-collection"), never surfacing
+the GPU block's stale numbers.
+
 Nothing here calls remote machines. When a piece is unavailable it degrades
 to a structured "unavailable" state — never a traceback, never fabricated
 values.
@@ -30,6 +39,14 @@ from .sys_collector import get_system_collector
 logger = logging.getLogger(__name__)
 
 CLI_TIMEOUT = 4.0  # seconds for the `ollama ps` CLI fallback
+
+# The realtime service refreshes every REFRESH_INTERVAL (see config). PROCESSOR
+# samples on its own 3s frontend cadence; within one refresh window it reuses
+# the realtime service's snapshot so both Dashboard blocks show the SAME
+# GPU/CPU/ollama numbers. Older snapshots are NOT used: if the realtime service
+# has not produced anything within its refresh window + grace, PROCESSOR
+# collects a fresh sample itself (never showing the GPU block stale numbers).
+_SNAPSHOT_MAX_AGE_FACTOR = 2.0
 
 
 def _f(value) -> Optional[float]:
@@ -89,6 +106,32 @@ class ProcessorCollector:
     def system(self):
         return self._system if self._system is not None else get_system_collector()
 
+    def _realtime_snapshot(self) -> Optional[dict]:
+        """The realtime service's CURRENT snapshot, or None when stale/absent.
+
+        This is the single shared GPU telemetry source: the Dashboard's
+        existing GPU block (WS snapshot + /api/status) and PROCESSOR both
+        consume it, so utilization/VRAM/temperature cannot diverge. Returns
+        None for a missing OR stale snapshot — a stalled realtime service
+        must not leak its old numbers into PROCESSOR (the existing
+        stale-snapshot workstream guarantees the same for /api/status).
+        """
+        try:
+            from .realtime import get_realtime_service
+            snap = get_realtime_service().last_snapshot
+        except Exception:  # realtime not running (tests / early startup)
+            return None
+        if not snap:
+            return None
+        try:
+            from .config import REFRESH_INTERVAL
+            max_age = REFRESH_INTERVAL * _SNAPSHOT_MAX_AGE_FACTOR
+        except Exception:
+            max_age = 2.0
+        if (time.time() - float(snap.get("ts") or 0)) > max_age:
+            return None
+        return snap
+
     # ---- local ollama ps CLI fallback ----------------------------------------
     async def _cli_ps(self) -> Optional[list]:
         """`ollama ps --format json` on THIS host; None when unusable.
@@ -132,10 +175,102 @@ class ProcessorCollector:
             })
         return models
 
+    # ---- shared realtime snapshot path ---------------------------------------
+    @staticmethod
+    def _models_from_running(running: list) -> list:
+        """Map WS-snapshot running-model rows (already normalized like /api/ps)
+        into the compact model list, tolerating garbage."""
+        models = []
+        for m in running or []:
+            if not isinstance(m, dict):
+                continue
+            models.append({
+                "name": m.get("name") or m.get("model") or "unknown",
+                "size_vram": _f(m.get("size_vram")) or 0,
+                "size": _f(m.get("size")) or 0,
+            })
+        return models
+
+    def _from_shared_snapshot(self, snap: dict) -> Optional[dict]:
+        """Build the PROCESSOR payload FROM the realtime service's snapshot.
+
+        Every GPU number (utilization, VRAM, temperature) comes from the same
+        object the Dashboard GPU block renders — zero divergence by construction.
+        CPU comes from the snapshot's system sample as well (the realtime
+        service already refreshed SystemCollector). Ollama running models come
+        from the snapshot's ollama section (same /api/ps data). Returns None
+        when the snapshot is not usable (missing cpu AND gpu sections).
+        """
+        gpu_data = snap.get("gpu") or {}
+        sysdata_cpu = snap.get("cpu") or {}
+        sysdata = {"cpu": sysdata_cpu, "hostname": (snap.get("system") or {}).get("hostname")}
+        gpus_raw = gpu_data.get("gpus") or []
+        running = (snap.get("ollama") or {}).get("running") or []
+        if not gpus_raw and sysdata_cpu.get("percent") is None:
+            return None  # not a usable snapshot — fall back to own collection
+
+        ollama_snap = snap.get("ollama") or {}
+        running = self._models_from_running(running)
+        vram_used = sum(m["size_vram"] for m in running)
+        gpus = [_clean_gpu(g, i) for i, g in enumerate(gpus_raw)]
+        load = sysdata_cpu.get("load") or [sysdata_cpu.get("load_1"), sysdata_cpu.get("load_5"), sysdata_cpu.get("load_15")]
+        load = [_f(x) for x in (list(load)[:3] if isinstance(load, (list, tuple)) else [])]
+        while len(load) < 3:
+            load.append(None)
+
+        out = {
+            "available": bool(gpu_data.get("available") or sysdata_cpu.get("percent") is not None or running),
+            "source": "local",
+            "host": sysdata.get("hostname") or "local",
+            "cpu": {
+                "utilization": _f(sysdata_cpu.get("percent")),
+                "cores_physical": sysdata_cpu.get("cores") or None,
+                "cores_logical": sysdata_cpu.get("threads") or None,
+                "load": load,
+            },
+            "gpus": gpus,
+            "gpu_available": bool(gpu_data.get("available")),
+            "gpu_reason": None if gpu_data.get("available") else (gpu_data.get("reason") or "no GPU data"),
+            "ollama": {
+                "online": bool(ollama_snap.get("online") or running),
+                "api_online": bool(ollama_snap.get("online")),
+                "cli_fallback_used": False,
+                "endpoint": ollama_snap.get("endpoint") or "",
+                "running_models": running,
+                "vram_used": vram_used or 0,
+            },
+            "telemetry_source": "realtime-snapshot",
+            "snapshot_ts": snap.get("ts"),
+            "ts": time.time(),
+        }
+        if not out["available"]:
+            bits = []
+            if not gpu_data.get("available"):
+                bits.append(gpu_data.get("reason") or "GPU unavailable")
+            if sysdata_cpu.get("percent") is None:
+                bits.append("CPU data unavailable")
+            if not (ollama_snap.get("online") or running):
+                bits.append("Ollama offline")
+            out["reason"] = "; ".join(bits) or "no processor data"
+        return out
+
     # ---- main entry ----------------------------------------------------------
     async def sample(self, force: bool = False) -> dict:
         if self._cache is not None and not force and (time.time() - self._cache_ts) < self._cache_ttl:
             return self._cache
+
+        # 1st priority: the CURRENT shared realtime snapshot (same object the
+        # Dashboard GPU block shows via WS / /api/status). This keeps PROCESSOR
+        # and the GPU block in lockstep and skips duplicate GPU sampling.
+        snap = self._realtime_snapshot()
+        if snap is not None and not force:
+            out = self._from_shared_snapshot(snap)
+            if out is not None:
+                self._cache, self._cache_ts = out, time.time()
+                return out
+
+        # 2nd priority: collect fresh data ourselves (realtime absent/stale —
+        # e.g. right after startup, or a stalled realtime loop).
         async with self._get_lock():
             if self._cache is not None and not force and (time.time() - self._cache_ts) < self._cache_ttl:
                 return self._cache
@@ -164,6 +299,7 @@ class ProcessorCollector:
             out = {
                 "available": bool(gpu_data.get("available") or cpu_raw.get("percent") is not None or running),
                 "source": "local",
+                "telemetry_source": "own-collection",
                 "host": sysdata.get("hostname") or "local",
                 "cpu": {
                     "utilization": _f(cpu_raw.get("percent")),
