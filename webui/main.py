@@ -17,6 +17,7 @@ from .jobs import JobManager
 from .ollama_client import OllamaClient, get_client
 from .realtime import RealtimeService
 from .routers import (
+    agents as agents_router,
     audit as audit_router,
     auth as auth_router,
     chat as chat_router,
@@ -151,6 +152,7 @@ async def index():
 app.include_router(auth_router.router)
 app.include_router(status_router.router)
 app.include_router(ollama_router.router)
+app.include_router(agents_router.router)
 app.include_router(chat_router.router)
 app.include_router(jobs_router.router)
 app.include_router(console_router.router)
