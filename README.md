@@ -29,7 +29,9 @@ Real screenshots go in [`docs/images/`](docs/images/) and are referenced here. *
 - **Pull** — streaming progress, speed, cancellation (as Jobs)
 - **Push** — publish to a registry
 - **Create** — visual + raw Modelfile editor
-- **Running Models** — live list with VRAM + Unload (stop via `keep_alive=0`)
+- **Running Models** — per-model cards with model VRAM (`/api/ps` size_vram,
+  not GPU telemetry), CPU/GPU split badge, context, live WS updates,
+  Chat deep link, Stop with double-click guard
 
 ### Jobs
 - All long operations (pull, push, create, delete, copy, stop) run as async Jobs

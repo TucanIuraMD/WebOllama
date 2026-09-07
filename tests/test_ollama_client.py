@@ -19,6 +19,9 @@ async def test_tags_and_ps():
     c = make_mock_ollama_client()
     tags = await c.tags()
     assert len(tags) == 2
+    # mock starts with an empty running list (matches a fresh Ollama start);
+    # load a model, then /api/ps must reflect it
+    await c.load("qwen3:8b")
     running = await c.running_models()
     assert running[0]["name"] == "qwen3:8b"
     assert running[0]["size_vram"] > 0
@@ -54,8 +57,10 @@ async def test_copy_and_delete():
 @pytest.mark.asyncio
 async def test_stop_unloads_via_keep_alive():
     c = make_mock_ollama_client()
-    # stop on loaded model should not raise
+    # stop on loaded model should not raise and actually unload
+    await c.load("qwen3:8b")
     await c.stop("qwen3:8b")
+    assert await c.running_models() == []
 
 
 @pytest.mark.asyncio
@@ -75,6 +80,7 @@ async def test_pull_stream_progress():
 @pytest.mark.asyncio
 async def test_status_reports_online():
     c = make_mock_ollama_client()
+    await c.load("qwen3:8b")
     st = await c.status()
     assert st["online"] is True
     assert st["models_count"] == 2

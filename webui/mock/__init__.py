@@ -50,17 +50,9 @@ class MockOllama:
                 "capabilities": ["completion"],
             },
         ]
-        self.running = running or [
-            {
-                "name": "qwen3:8b",
-                "model": "qwen3:8b",
-                "size": 4_700_000_000,
-                "size_vram": 4_600_000_000,
-                "digest": "abc123",
-                "expires_at": "2026-08-03T10:00:00Z",
-                "details": {"family": "qwen3", "parameter_size": "7.6B", "quantization_level": "Q4_K_M"},
-            }
-        ]
+        # Running starts EMPTY (a real Ollama restart loads nothing);
+        # tests that need a loaded model call /run or pass running=[...].
+        self.running = list(running) if running is not None else []
 
     def transport(self) -> httpx.MockTransport:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -122,7 +114,12 @@ class MockOllama:
                     # empty-prompt generate = preload/load into VRAM
                     if not any(m["name"] == model for m in self.running):
                         src = next(m for m in self.models if m["name"] == model)
-                        self.running.append(dict(src, size_vram=src["size"]))
+                        # real /api/ps entries carry context_length top-level
+                        ctx = (src.get("details") or {}).get("context_length")
+                        entry = dict(src, size_vram=src["size"], expires_at="2026-08-03T10:00:00Z")
+                        if ctx:
+                            entry["context_length"] = ctx
+                        self.running.append(entry)
                     return httpx.Response(200, json={
                         "model": model, "done": True, "response": "",
                     })

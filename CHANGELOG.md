@@ -4,6 +4,13 @@
 
 ### Features
 
+- **Running v2 — model cards + live states**: per-model cards (model VRAM
+  from `/api/ps` size_vram — not GPU telemetry, derived CPU/GPU split
+  badge, context, unload time), explicit loading/error/offline/empty
+  states, Chat deep link (`#chat?model=…` preselect), Stop with
+  double-click guard + flight label, working refresh. Live updates still
+  via the single realtime WS snapshot — no second polling mechanism.
+  See `docs/RUNNING-UI-V2.md`.
 - **Models v2 — Ollama capabilities**: model list shows Tools/Thinking/
   Completion/Vision chips (from Ollama `/api/tags`, never guessed),
   multi-select AND capability filter, running status column, Run/Stop

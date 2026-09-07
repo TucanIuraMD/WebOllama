@@ -293,6 +293,16 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
 .cap-chip:hover { border-color: var(--accent); color: var(--text); }
 .cap-chip.active { background: var(--accent); border-color: var(--accent); color: #0a0e14; font-weight: 600; }
 
+/* ---- Running v2: model cards ---- */
+.run-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 12px; margin-top: 4px; }
+.run-card { background: var(--bg-3); border: 1px solid var(--border-2); border-radius: 8px; padding: 12px 14px; }
+.run-card-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.run-card-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.run-card-grid { margin: 0; }
+.run-card-grid .k { color: var(--text-faint); font-size: 12px; }
+.run-card-grid .v { font-size: 13px; }
+.run-card-actions { display: flex; gap: 8px; margin-top: 10px; border-top: 1px solid var(--border-2); padding-top: 10px; }
+
 /* ---- Detail grid ---- */
 .detail-grid { display: grid; grid-template-columns: 180px 1fr; gap: 6px 14px; font-size: 13px; }
 .detail-grid .k { color: var(--text-dim); font-family: var(--mono); font-size: 12px; }

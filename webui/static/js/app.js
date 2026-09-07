@@ -69,7 +69,18 @@ const App = {
 
   route() {
     const hash = (location.hash || "#dashboard").slice(1);
-    const page = hash.split("?")[0];
+    const qIndex = hash.indexOf("?");
+    const page = (qIndex === -1 ? hash : hash.slice(0, qIndex));
+    // per-page query params, e.g. #chat?model=qwen3:8b — pages read them
+    // via App.state.pageQuery (kept until the next route change).
+    this.state.pageQuery = {};
+    if (qIndex !== -1) {
+      try {
+        for (const [k, v] of new URLSearchParams(hash.slice(qIndex + 1))) {
+          this.state.pageQuery[k] = v;
+        }
+      } catch { /* malformed query — ignore */ }
+    }
     this.state.currentPage = page;
     document.querySelectorAll(".nav-item").forEach((a) => {
       a.classList.toggle("active", a.dataset.page === page);
@@ -95,6 +106,14 @@ const App = {
   },
 
   updateFromSnapshot(snap) {
+    // Stale-snapshot guard: never apply a snapshot older than the one we
+    // already rendered (WS reconnects / racing GETs can reorder delivery).
+    const ts = Number(snap && snap.ts);
+    if (Number.isFinite(ts) && Number.isFinite(this._lastSnapshotTs) && ts < this._lastSnapshotTs) {
+      console.warn("Ignoring stale snapshot:", ts, "<", this._lastSnapshotTs);
+      return;
+    }
+    if (Number.isFinite(ts)) this._lastSnapshotTs = ts;
     this.state.snapshot = snap;
     // top bar ollama indicator
     const ollama = snap.ollama || {};

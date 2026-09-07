@@ -34,16 +34,15 @@ def _isolate_rate_limiters(monkeypatch):
 async def test_models_list_carries_capabilities_and_running(client):
     """GET /api/ollama/models: every model carries capabilities from Ollama
     /api/tags verbatim + a running flag derived from /api/ps."""
-    client.get("/api/auth/login", **{})  # noop for readability
-    r = client.post("/api/auth/login", json={"username": "admin", "password": "changeme"})
-    assert r.status_code == 200
+    client.post("/api/auth/login", json={"username": "admin", "password": "changeme"})
+    assert client.post("/api/ollama/models/qwen3:8b/run").status_code == 200
     data = client.get("/api/ollama/models").json()
     assert data["count"] == 2
     by_name = {m["name"]: m for m in data["models"]}
     # capabilities come verbatim from Ollama (mock mirrors real /api/tags)
     assert by_name["qwen3:8b"]["capabilities"] == ["completion", "tools"]
     assert by_name["llama3.2:1b"]["capabilities"] == ["completion"]
-    # running flag: qwen3:8b is preloaded in the mock's running list
+    # running flag: qwen3:8b was loaded via run above (mock starts empty)
     assert by_name["qwen3:8b"]["running"] is True
     assert by_name["llama3.2:1b"]["running"] is False
 

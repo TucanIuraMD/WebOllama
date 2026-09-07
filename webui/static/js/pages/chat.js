@@ -12,6 +12,10 @@
       models = data.models || [];
       if (models.length && !currentModel) currentModel = models[0].name;
     } catch { models = []; }
+    // Deep-link preselect: #chat?model=<name> (e.g. from the Running page).
+    // Only applied when the requested model exists in the model list.
+    const requested = App.state && App.state.pageQuery && App.state.pageQuery.model;
+    if (requested && models.some((m) => m.name === requested)) currentModel = requested;
     el.innerHTML = `
       <div class="card">
         <div class="card-title">

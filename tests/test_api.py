@@ -2,6 +2,20 @@
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_rate_limiters(monkeypatch):
+    """test_api touches dangerous-limited endpoints (chat/run, models run);
+    isolate the shared process-wide limiter so tests don't 429 each other."""
+    from webui import deps, security
+    from webui.security import RateLimiter
+
+    monkeypatch.setattr(deps, "_dangerous_limiter", RateLimiter(10_000, 1))
+    monkeypatch.setattr(deps, "_general_limiter", RateLimiter(10_000, 1))
+    security._rate.clear()
+    yield
+    security._rate.clear()
+
+
 def _login(client):
     """Helper: login and return session cookies."""
     r = client.post("/api/auth/login", json={"username": "admin", "password": "changeme"})
@@ -32,6 +46,8 @@ async def test_models_list(client):
 @pytest.mark.asyncio
 async def test_running_models(client):
     _login(client)
+    # mock starts with nothing loaded (fresh Ollama start); load one first
+    assert client.post("/api/ollama/models/qwen3:8b/run").status_code == 200
     r = client.get("/api/ollama/running")
     assert r.status_code == 200
     data = r.json()
