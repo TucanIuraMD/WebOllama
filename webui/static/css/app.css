@@ -303,6 +303,12 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
 .run-card-grid .v { font-size: 13px; }
 .run-card-actions { display: flex; gap: 8px; margin-top: 10px; border-top: 1px solid var(--border-2); padding-top: 10px; }
 
+/* ---- Dashboard v2 ---- */
+.dash-nav { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.dash-nav .btn-sm { text-decoration: none; padding: 5px 12px; }
+a.metric-tile.dash-link { text-decoration: none; color: inherit; display: block; }
+a.metric-tile.dash-link:hover { border-color: var(--accent); }
+
 /* ---- Detail grid ---- */
 .detail-grid { display: grid; grid-template-columns: 180px 1fr; gap: 6px 14px; font-size: 13px; }
 .detail-grid .k { color: var(--text-dim); font-family: var(--mono); font-size: 12px; }

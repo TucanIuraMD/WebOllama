@@ -43,6 +43,10 @@ def _reset_singletons():
     ws_mod._manager = None
     console_mod._console = None
     db_mod.Database._instance = None
+    # PROCESSOR collector caches its payload (TTL 2s) — must reset or a
+    # previous test's payload leaks into the next test's /api/system/processor
+    import webui.remote_sys as remote_sys_mod
+    remote_sys_mod._processor = None
 
 
 @pytest.fixture(autouse=True)

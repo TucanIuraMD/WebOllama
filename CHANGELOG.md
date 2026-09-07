@@ -4,6 +4,15 @@
 
 ### Features
 
+- **Dashboard v2 — single daily-driver screen**: shell-first render with
+  explicit loading/error/offline/empty states (API errors never render as
+  "no data"), quick-nav to Models/Running/Jobs/Chat/Agents/GPU (tiles are
+  links), compact Running block with model VRAM + CPU/GPU split badge from
+  real data only, GPU VRAM vs Model VRAM shown as separate labelled rows
+  from the ONE shared realtime snapshot, PROCESSOR poll fixed to a single
+  page-scoped interval with seq-guards (no timer leaks, no duplicate
+  polling, stale badge after repeated failures). No new backend APIs.
+  See `docs/DASHBOARD-V2.md`.
 - **Running v2 — model cards + live states**: per-model cards (model VRAM
   from `/api/ps` size_vram — not GPU telemetry, derived CPU/GPU split
   badge, context, unload time), explicit loading/error/offline/empty
