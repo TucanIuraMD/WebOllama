@@ -31,12 +31,18 @@ const API = {
   del: (url) => API.request("DELETE", url),
 };
 
+/* Byte formatter — DECIMAL units, matching `ollama ls` / `ollama ps` output
+ * (Ollama CLI prints model sizes in decimal GB: bytes / 1_000_000_000).
+ * Division by 1024 (binary units, "GiB") made WebOllama show 6.2 GB where
+ * `ollama ls` showed 6.7 GB for the same model. The number displayed here
+ * must be directly comparable with the CLI, so: decimal everywhere.
+ * API values are passed through untouched — only display changes. */
 function fmtBytes(n, dp) {
   if (n === null || n === undefined || isNaN(n)) return "—";
   n = Number(n);
   const units = ["B", "KB", "MB", "GB", "TB", "PB"];
   let i = 0;
-  while (n >= 1024 && i < units.length - 1) { n /= 1024; i++; }
+  while (n >= 1000 && i < units.length - 1) { n /= 1000; i++; }
   const d = dp !== undefined ? dp : (i === 0 ? 0 : 1);
   return n.toFixed(d) + " " + units[i];
 }

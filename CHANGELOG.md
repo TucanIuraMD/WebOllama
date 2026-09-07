@@ -2,6 +2,17 @@
 
 ## 1.3.0 (2026-09-07)
 
+### Fixed
+
+- **Models UI — model sizes now match `ollama ls`**: the shared byte
+  formatter divided by 1024 (GiB) but labelled the result "GB", so a
+  6_700_000_000-byte model showed "6.2 GB" while `ollama ls` showed
+  "6.7 GB". `fmtBytes` now uses decimal units (bytes / 1_000) — the same
+  units as the Ollama CLI — with the existing precision/rounding
+  preserved; API values untouched. The fix applies everywhere the shared
+  formatter renders sizes (Models, Running, Dashboard/GPU, PROCESSOR,
+  System/Jobs speeds). See `docs/MODELS-SIZE-DISPLAY.md`.
+
 ### Features
 
 - **Dashboard v2 — single daily-driver screen**: shell-first render with
