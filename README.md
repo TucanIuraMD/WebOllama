@@ -21,6 +21,9 @@ Real screenshots go in [`docs/images/`](docs/images/) and are referenced here. *
 
 ### Model Manager
 - Table with search, family filter, multi-column sort, multi-select + batch delete
+- **Capabilities filter** — Tools / Thinking / Completion / Vision (multi-select AND,
+  from Ollama `/api/tags`; unknown capabilities shown but never guessed)
+- **Run / Stop** row actions — load a model into VRAM, status column shows running state
 - **Show** — full details modal (details, modelfile, template, parameters, system, license, messages)
 - **Copy**, **Delete** (with confirmation)
 - **Pull** — streaming progress, speed, cancellation (as Jobs)

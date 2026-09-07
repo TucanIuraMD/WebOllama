@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.3.0 (2026-09-07)
+
+### Features
+
+- **Models v2 — Ollama capabilities**: model list shows Tools/Thinking/
+  Completion/Vision chips (from Ollama `/api/tags`, never guessed),
+  multi-select AND capability filter, running status column, Run/Stop
+  row actions (`POST /api/ollama/models/{name}/run` → empty-prompt
+  generate preload), honest offline/empty/filtered-empty states,
+  in-place list refresh after delete. Unknown capabilities render marked
+  and never match known filters. See `docs/MODELS-UI-V2.md`.
+- `/api/ollama/models/{name}/show` surfaces `context_length` from
+  `model_info` (real Ollama keeps it there, not in `details`).
+
 ## 1.2.0 (2026-09-07)
 
 ### Features

@@ -47,7 +47,7 @@ class MockOllama:
                     "quantization_level": "Q4_K_M",
                     "parent_model": "",
                 },
-                "capabilities": ["completion", "tools"],
+                "capabilities": ["completion"],
             },
         ]
         self.running = running or [
@@ -81,6 +81,8 @@ class MockOllama:
                 model = next((m for m in self.models if m["name"] == body.get("name")), None)
                 if not model:
                     return httpx.Response(404, json={"error": "model not found"})
+                d = model.get("details", {})
+                family = d.get("family", "mock")
                 return httpx.Response(200, json={
                     "model": model["name"],
                     "modelfile": "FROM " + model["name"],
@@ -88,8 +90,12 @@ class MockOllama:
                     "template": "{{ .Prompt }}",
                     "system": "mock system",
                     "license": "MIT",
-                    "details": model["details"],
+                    "details": d,
                     "capabilities": model.get("capabilities", []),
+                    "model_info": {
+                        "general.architecture": family,
+                        f"{family}.context_length": d.get("context_length", 4096),
+                    },
                 })
             if path == "/api/copy":
                 src = body.get("source", "")
@@ -105,8 +111,21 @@ class MockOllama:
                 self.running = [m for m in self.running if m["name"] != name]
                 return httpx.Response(200, json={})
             if path == "/api/generate":
-                if not any(m["name"] == body.get("model") for m in self.models):
+                model = body.get("model", "")
+                if not any(m["name"] == model for m in self.models):
                     return httpx.Response(404, json={"error": "model not found"})
+                if body.get("keep_alive") == 0:
+                    # official unload mechanism: keep_alive=0 drops from VRAM
+                    self.running = [m for m in self.running if m["name"] != model]
+                    return httpx.Response(200, json={"model": model, "done": True, "response": ""})
+                if not body.get("prompt") and not body.get("raw"):
+                    # empty-prompt generate = preload/load into VRAM
+                    if not any(m["name"] == model for m in self.running):
+                        src = next(m for m in self.models if m["name"] == model)
+                        self.running.append(dict(src, size_vram=src["size"]))
+                    return httpx.Response(200, json={
+                        "model": model, "done": True, "response": "",
+                    })
                 return httpx.Response(200, json={"done": True, "response": "mock"})
             if path == "/api/chat":
                 if not any(m["name"] == body.get("model") for m in self.models):

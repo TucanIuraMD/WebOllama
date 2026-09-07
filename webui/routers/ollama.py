@@ -85,16 +85,49 @@ async def running_models(user: dict = Depends(require_user)):
 async def list_models(user: dict = Depends(require_user)):
     try:
         models = await _client().tags()
+        # Running state comes from the same client (/api/ps) — one source of
+        # truth, no separate model-state store. If Ollama is offline for the
+        # ps call the list is still served, just without running flags.
+        try:
+            running_names = {m.get("name") for m in await _client().running_models()}
+        except OllamaError:
+            running_names = set()
+        for m in models:
+            m["running"] = m.get("name") in running_names
         return {"models": models, "count": len(models)}
     except OllamaError as exc:
         raise HTTPException(status_code=502, detail=exc.message)
+
+
+@router.post("/models/{name:path}/run")
+async def run_model(
+    name: str,
+    user: dict = Depends(require_user),
+    rate=Depends(rate_limit_dangerous),
+):
+    """Load a model into VRAM (Ollama: empty-prompt generate + keep_alive)."""
+    try:
+        await _client().load(name)
+        await get_audit().log(user["username"], "run", name)
+        return {"ok": True, "model": name, "running": True}
+    except OllamaError as exc:
+        raise HTTPException(502, detail=exc.message)
 
 
 # ---- specific actions on a model (declared before the {name:path} catch-all) ----------
 @router.post("/models/{name:path}/show")
 async def show_model(name: str, user: dict = Depends(require_user)):
     try:
-        return await _client().show(name)
+        data = await _client().show(name)
+        # Real Ollama puts context_length in model_info ("{family}.context_length"),
+        # not in details — surface it uniformly for the UI.
+        if data.get("context_length") is None:
+            info = data.get("model_info") or {}
+            for k, v in info.items():
+                if k.endswith(".context_length"):
+                    data["context_length"] = v
+                    break
+        return data
     except OllamaError as exc:
         raise HTTPException(502, detail=exc.message)
 

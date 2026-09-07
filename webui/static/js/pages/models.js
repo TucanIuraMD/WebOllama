@@ -1,4 +1,6 @@
-/* Models page — full model manager: list, search, sort, multi-select, show, copy, delete, pull, create */
+/* Models page — full model manager: list, search, sort, multi-select, show, copy, delete, pull, create
+ * v2: Ollama capabilities (Tools/Thinking/Completion/Vision) with multi-select
+ * filter, running status column, Run/Stop actions, honest empty/offline states. */
 (function () {
   let models = [];
   let selected = new Set();
@@ -6,13 +8,26 @@
   let sortAsc = true;
   let filterText = "";
   let filterFamily = "";
+  // Ollama capabilities only (NOT the Agents capability catalog — those are
+  // different levels of data and live in the Agents page).
+  const OLLAMA_CAPS = ["tools", "thinking", "completion", "vision"];
+  const CAP_LABEL = { tools: "Tools", thinking: "Thinking", completion: "Completion", vision: "Vision" };
+  let filterCaps = new Set();
+  // busy flags per model for Run/Stop buttons (idempotence during flight)
+  let busyActions = new Set();
+  let loadError = "";
+  let listLoaded = false;
 
   async function render(el) {
+    loadError = "";
     try {
       const data = await API.get("/api/ollama/models");
       models = data.models || [];
+      listLoaded = true;
     } catch (e) {
       models = [];
+      listLoaded = false;
+      loadError = e.message || "failed to load models";
     }
     selected.clear();
     el.innerHTML = buildPage();
@@ -25,6 +40,15 @@
       filterFamily = document.getElementById("model-family").value;
       renderTable();
     };
+    // capability filter chips (multi-select)
+    document.querySelectorAll("#cap-filter .cap-chip").forEach((chip) => {
+      chip.onclick = () => {
+        const cap = chip.dataset.cap;
+        if (filterCaps.has(cap)) filterCaps.delete(cap); else filterCaps.add(cap);
+        chip.classList.toggle("active", filterCaps.has(cap));
+        renderTable();
+      };
+    });
     document.getElementById("select-all").onchange = () => {
       const checked = document.getElementById("select-all").checked;
       filteredModels().forEach((m) => { if (checked) selected.add(m.name); else selected.delete(m.name); });
@@ -38,6 +62,13 @@
     const families = [...new Set(models.map((m) => m.details && m.details.family).filter(Boolean))].sort();
     const sel = document.getElementById("model-family");
     families.forEach((f) => { sel.innerHTML += `<option value="${esc(f)}">${esc(f)}</option>`; });
+  }
+
+  function modelCaps(m) {
+    // Only what Ollama actually reports via /api/tags (capabilities array).
+    // Unknown capability names are passed through for display but never
+    // guessed from the model name.
+    return Array.isArray(m.capabilities) ? m.capabilities : [];
   }
 
   function buildPage() {
@@ -55,6 +86,11 @@
             <button class="btn btn-danger btn-sm" id="batch-delete-btn">🗑 Delete</button>
           </span>
         </div>
+        <div class="filter-bar" id="cap-filter">
+          <span class="text-dim nowrap">Capabilities:</span>
+          ${OLLAMA_CAPS.map((c) => `<button class="btn-sm cap-chip${filterCaps.has(c) ? " active" : ""}" data-cap="${c}">${CAP_LABEL[c]}</button>`).join("")}
+        </div>
+        ${loadError ? `<div class="alert error">⚠ Ollama unavailable — ${esc(loadError)}</div>` : ""}
         <div style="overflow-x:auto">
           <table>
             <thead>
@@ -65,24 +101,40 @@
                 <th onclick="sortModels('params')" class="nowrap">Parameters</th>
                 <th onclick="sortModels('quant')" class="nowrap">Quant</th>
                 <th onclick="sortModels('family')" class="nowrap">Family</th>
+                <th class="nowrap">Capabilities</th>
                 <th onclick="sortModels('modified')" class="nowrap">Modified</th>
+                <th class="nowrap">Status</th>
                 <th class="nowrap">Actions</th>
               </tr>
             </thead>
             <tbody id="model-tbody"></tbody>
           </table>
         </div>
-      </div>
-      <div class="empty" id="model-empty" style="display:none">
-        <div class="big">📦</div>
-        No models found. Pull one from the library.
+        <div class="empty" id="model-empty" style="display:none"></div>
       </div>`;
+  }
+
+  function emptyStateHtml() {
+    if (loadError) {
+      return `<div class="big">⚠️</div>Ollama unavailable<div class="text-dim">${esc(loadError)}</div>`;
+    }
+    if (models.length && !filteredModels().length) {
+      return `<div class="big">🔍</div>No models match the current filters<div class="text-dim">Adjust search or capability filters.</div>`;
+    }
+    return `<div class="big">📦</div>No models found. Pull one from the library.`;
   }
 
   function filteredModels() {
     return models.filter((m) => {
       if (filterText && !m.name.toLowerCase().includes(filterText)) return false;
       if (filterFamily && (m.details && m.details.family) !== filterFamily) return false;
+      // capability filter: model must have ALL selected capabilities
+      // (multi-select AND). Models without Ollama capability data never
+      // match a capability filter — unknown is not "supported".
+      if (filterCaps.size) {
+        const caps = new Set(modelCaps(m).map((c) => String(c).toLowerCase()));
+        for (const c of filterCaps) if (!caps.has(c)) return false;
+      }
       return true;
     }).sort((a, b) => {
       let va, vb;
@@ -98,16 +150,32 @@
     });
   }
 
+  function capChipsHtml(m) {
+    const caps = modelCaps(m);
+    if (!caps.length) return `<span class="text-faint">—</span>`;
+    return caps.map((c) => {
+      const known = OLLAMA_CAPS.includes(String(c).toLowerCase());
+      const label = CAP_LABEL[String(c).toLowerCase()] || c;
+      return `<span class="badge cap${known ? "" : " cap-unknown"}" title="${known ? "Ollama capability" : "Unknown capability (reported by Ollama)"}">${esc(label)}</span>`;
+    }).join(" ");
+  }
+
   function renderTable() {
     const tbody = document.getElementById("model-tbody");
     const empty = document.getElementById("model-empty");
     const rows = filteredModels();
-    if (!rows.length) { tbody.innerHTML = ""; empty.style.display = "block"; return; }
-    empty.style.display = "none";
+    if (empty) empty.innerHTML = emptyStateHtml();
+    if (!rows.length) { if (tbody) tbody.innerHTML = ""; if (empty) empty.style.display = "block"; updateBatchBar(); return; }
+    if (empty) empty.style.display = "none";
     document.getElementById("model-count").textContent = rows.length;
     tbody.innerHTML = rows.map((m) => {
       const d = m.details || {};
       const sel = selected.has(m.name) ? "checked" : "";
+      const isRunning = !!m.running;
+      const busy = busyActions.has(m.name);
+      const runBtn = isRunning
+        ? `<button class="btn-sm" data-action="model-stop" data-model="${esc(m.name)}" ${busy ? "disabled" : ""}>${busy ? "…" : "⏹ Stop"}</button>`
+        : `<button class="btn-sm" data-action="model-run" data-model="${esc(m.name)}" ${busy ? "disabled" : ""}>${busy ? "…" : "▶ Run"}</button>`;
       return `<tr>
         <td><input type="checkbox" ${sel} onchange="toggleSelect('${esc(m.name)}')" /></td>
         <td class="mono ellipsis" title="${esc(m.name)}">${esc(m.name)}</td>
@@ -115,9 +183,12 @@
         <td class="text-dim">${esc(d.parameter_size || "—")}</td>
         <td><span class="badge quant">${esc(d.quantization_level || "—")}</span></td>
         <td><span class="badge family">${esc(d.family || "—")}</span></td>
+        <td class="nowrap">${capChipsHtml(m)}</td>
         <td class="text-dim">${(m.modified_at || "").slice(0, 10)}</td>
+        <td>${isRunning ? `<span class="badge running-badge">● running</span>` : `<span class="text-faint">○ not loaded</span>`}</td>
         <td class="nowrap">
           <button class="btn-sm" data-action="model-show" data-model="${esc(m.name)}">🔍</button>
+          ${runBtn}
           <button class="btn-sm" data-action="model-copy" data-model="${esc(m.name)}">📋</button>
           <button class="btn-sm btn-danger" data-action="model-delete" data-model="${esc(m.name)}">🗑</button>
         </td>
@@ -154,13 +225,74 @@
     window.Actions["model-show"] = (data) => showModel(data.model);
     window.Actions["model-copy"] = (data) => showCopyModal(data.model);
     window.Actions["model-delete"] = (data) => confirmDelete(data.model);
+    window.Actions["model-run"] = (data, btn) => runModel(data.model, btn);
+    window.Actions["model-stop"] = (data, btn) => stopModel(data.model, btn);
   }
   setupActions();
+
+  // Refresh only the model list data + table (keeps filters/scroll), used
+  // after in-place mutations instead of a full page re-render.
+  async function refreshList() {
+    try {
+      const data = await API.get("/api/ollama/models");
+      models = data.models || [];
+      listLoaded = true;
+      loadError = "";
+    } catch (e) {
+      loadError = e.message || "failed to load models";
+    }
+    renderTable();
+  }
+
+  async function runModel(name, btn) {
+    if (busyActions.has(name)) return;
+    busyActions.add(name);
+    if (btn) { btn.disabled = true; btn.textContent = "…"; }
+    try {
+      await API.post(`/api/ollama/models/${encodeURIComponent(name)}/run`);
+      toast(`Loading ${name}…`, "info");
+      // poll briefly until /api/ps shows it (Ollama load is async)
+      for (let i = 0; i < 10; i++) {
+        await new Promise((r) => setTimeout(r, 500));
+        try {
+          const ps = await API.get("/api/ollama/running");
+          if ((ps.models || []).some((m) => m.name === name)) { toast(`${name} is running`, "success"); break; }
+        } catch { break; }
+      }
+    } catch (e) {
+      toast(`Run failed: ${e.message}`, "error");
+    } finally {
+      busyActions.delete(name);
+      await refreshList();
+    }
+  }
+
+  async function stopModel(name, btn) {
+    if (busyActions.has(name)) return;
+    busyActions.add(name);
+    if (btn) { btn.disabled = true; btn.textContent = "…"; }
+    try {
+      await API.del(`/api/ollama/models/${encodeURIComponent(name)}/stop`);
+      toast(`Unloaded ${name}`, "success");
+    } catch (e) {
+      toast(`Stop failed: ${e.message}`, "error");
+    } finally {
+      busyActions.delete(name);
+      await refreshList();
+    }
+  }
 
   async function showModel(name) {
     try {
       const data = await API.post(`/api/ollama/models/${encodeURIComponent(name)}/show`);
       const d = data.details || {};
+      const caps = Array.isArray(data.capabilities) && data.capabilities.length
+        ? data.capabilities.map((c) => {
+            const known = OLLAMA_CAPS.includes(String(c).toLowerCase());
+            const label = CAP_LABEL[String(c).toLowerCase()] || c;
+            return `<span class="badge cap${known ? "" : " cap-unknown"}">${esc(label)}</span>`;
+          }).join(" ")
+        : `<span class="text-faint">unknown</span>`;
       let html = `<div class="detail-grid">`;
       const fields = [
         ["Model", data.model || name],
@@ -169,13 +301,12 @@
         ["Parameter Size", d.parameter_size],
         ["Quantization", d.quantization_level],
         ["Format", d.format],
+        ["Context Length", data.context_length],
         ["Parent Model", d.parent_model || "—"],
-        ["Capabilities", (data.capabilities || []).join(", ")],
-        ["Context Length", d.context_length],
-        ["Embedding Length", d.embedding_length],
         ["Digest", data.digest || ""],
       ];
       fields.forEach(([k, v]) => { html += `<div class="k">${k}</div><div class="v mono">${esc(v != null ? String(v) : "—")}</div>`; });
+      html += `<div class="k">Capabilities</div><div class="v">${caps}</div>`;
       html += `</div>`;
       if (data.license) html += `<div class="card-title" style="margin-top:14px">License</div><pre style="background:#05070b;padding:10px;border-radius:6px;font-size:12px;max-height:200px;overflow:auto" class="mono">${esc(data.license)}</pre>`;
       if (data.modelfile) html += `<div class="card-title" style="margin-top:14px">Modelfile</div><pre style="background:#05070b;padding:10px;border-radius:6px;font-size:12px;max-height:300px;overflow:auto" class="mono">${esc(data.modelfile)}</pre>`;
@@ -230,7 +361,10 @@
       await API.del(`/api/ollama/models/${encodeURIComponent(name)}`);
       toast("Deleted", "success");
       closeModal();
-      render(document.getElementById("page-container"));
+      // remove locally + refresh running flags; no full page re-render
+      models = models.filter((m) => m.name !== name);
+      selected.delete(name);
+      await refreshList();
     } catch (e) {
       toast("Delete failed: " + e.message, "error");
     }
@@ -255,7 +389,8 @@
       toast(`Deleted ${ok}/${names.length} models`, "success");
       closeModal();
       selected.clear();
-      render(document.getElementById("page-container"));
+      // refresh list in place (batch endpoint may partially fail)
+      await refreshList();
     } catch (e) {
       toast("Batch delete failed: " + e.message, "error");
     }

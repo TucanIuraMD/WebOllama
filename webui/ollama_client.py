@@ -173,6 +173,17 @@ class OllamaClient:
             {"model": model, "prompt": prompt, "stream": stream},
         )
 
+    async def load(self, model: str, keep_alive: str = "5m") -> dict:
+        """Load (run) a model into VRAM without generating text.
+
+        Ollama's documented way to preload: /api/generate with an empty
+        prompt — the model is loaded and kept in memory for keep_alive.
+        """
+        return await self._request(
+            "POST", "/api/generate",
+            {"model": model, "keep_alive": keep_alive},
+        )
+
     async def embed(self, model: str, input_text: str) -> dict:
         return await self._request("POST", "/api/embed", {"model": model, "input": input_text})
 

@@ -285,6 +285,14 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
 .badge.family { color: var(--accent-2); }
 .badge.loaded { color: var(--green); border-color: var(--green); background: var(--green-bg); }
 
+/* ---- Models v2: Ollama capability chips + running status ---- */
+.badge.cap { color: var(--accent); border-color: var(--accent); background: transparent; margin-right: 2px; }
+.badge.cap-unknown { color: var(--text-faint); border-style: dashed; border-color: var(--text-faint); }
+.badge.running-badge { color: var(--green); border-color: var(--green); background: var(--green-bg); font-weight: 600; }
+.cap-chip { background: var(--bg-4); border: 1px solid var(--border-2); color: var(--text-dim); border-radius: 12px; padding: 3px 12px; cursor: pointer; font-size: 12px; }
+.cap-chip:hover { border-color: var(--accent); color: var(--text); }
+.cap-chip.active { background: var(--accent); border-color: var(--accent); color: #0a0e14; font-weight: 600; }
+
 /* ---- Detail grid ---- */
 .detail-grid { display: grid; grid-template-columns: 180px 1fr; gap: 6px 14px; font-size: 13px; }
 .detail-grid .k { color: var(--text-dim); font-family: var(--mono); font-size: 12px; }

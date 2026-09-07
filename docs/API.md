@@ -44,9 +44,10 @@ Authenticate via:
 
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| GET | `/api/ollama/models` | Yes | List all models |
+| GET | `/api/ollama/models` | Yes | List all models (each entry carries `capabilities` from Ollama + `running` flag) |
 | GET | `/api/ollama/models/{name}` | Yes | Get model info |
-| POST | `/api/ollama/models/{name}/show` | Yes | Full model details (modelfile, template, parameters, etc.) |
+| POST | `/api/ollama/models/{name}/show` | Yes | Full model details (modelfile, template, parameters, etc.; `context_length` surfaced from `model_info`) |
+| POST | `/api/ollama/models/{name}/run` | Yes | Load model into VRAM (empty-prompt generate, `keep_alive=5m`) |
 | POST | `/api/ollama/models/{name}/copy` | Yes | Copy model |
 | DELETE | `/api/ollama/models/{name}` | Yes | Delete model |
 | DELETE | `/api/ollama/models/{name}/stop` | Yes | Unload model from VRAM |
