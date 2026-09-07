@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.0 (2026-09-07)
+
+### Features
+
+- **Chat v3 — Markdown rendering**: model replies render as Markdown
+  (headers, bold/italic, lists, quotes, tables, inline/fenced code with
+  `language-*` classes) via vendored marked 12.0.2 + DOMPurify 3.1.6
+  (`js/md.js` bridge). Sanitization is mandatory in the pipeline: scripts,
+  event handlers, `javascript:` URLs and embeds are stripped; the bridge
+  degrades to escaped plain text if a library is missing. See
+  `docs/CHAT-UI-V3.md`.
+
 ## 1.1.0 (2026-09-06)
 
 ### Features

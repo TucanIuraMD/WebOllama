@@ -118,6 +118,9 @@ while Ollama is offline.
 (`{"error": "..."}`). HTTP-level errors (400/401) use the standard
 `{"detail": "..."}` envelope.
 
+The Web UI renders `delta` content as Markdown (vendored marked +
+DOMPurify; sanitized). The API itself always returns raw text.
+
 ### Logs
 
 | Method | Path | Auth | Description |

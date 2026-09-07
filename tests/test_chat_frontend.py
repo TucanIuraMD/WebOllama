@@ -57,6 +57,11 @@ global.toast = () => {};
 global.fmtDuration = (sec) => `${Math.floor(sec || 0)}s`;
 global.App = { state: { user: { username: 'admin', role: 'admin' } } };
 
+// ---- markdown stub (real md.js is covered separately with libs; here we
+// just need a deterministic pipe so chat.js wiring is observable) ----
+let mdCalls = [];
+global.renderMarkdown = (text) => { mdCalls.push(String(text)); return '<md>' + global.esc(text) + '</md>'; };
+
 // ---- streaming fetch stub ----
 let fetchImpl = null; let lastFetch = null; let aborted = false;
 function sseResponse(events, { failAfter = null } = {}) {
@@ -141,12 +146,24 @@ async function main() {
   await check('streams deltas into output and keeps user bubble', () => {
     const out = els['chat-output'];
     assert(out._html.includes('hi there'), 'user message missing');
-    const joined = textOf(out);
-    assert(joined.includes('Hello world'), 'streamed reply missing, got: ' + JSON.stringify(joined));
-    // cursor is removed in the finally block once generation completes
-    const cursorCount = (joined.match(/▍/g) || []).length;
+    // markdown stub returns '<md>' + escaped text — the stubbed pipe is the
+    // observable; plain-text walk can't see into innerHTML-assigned bodies
+    const bodyNode = els['chat-output']._children.find((c) => String(c.className).includes('chat-md'));
+    assert(bodyNode, 'no .chat-md body node');
+    assert(bodyNode._html.includes('Hello world'), 'markdown-rendered reply missing: ' + bodyNode._html);
+    const cursorCount = (bodyNode._html.match(/▍/g) || []).length;
     assert(cursorCount === 0, 'cursor should be gone after completion, got ' + cursorCount);
   });
+  await check('reply body went through the markdown pipeline', () => {
+    // the accumulated buffer was re-rendered per delta and finalized once
+    assert(mdCalls.length >= 2, 'renderMarkdown not called, calls=' + mdCalls.length);
+    assert(mdCalls[mdCalls.length - 1] === 'Hello world', 'final render got: ' + mdCalls[mdCalls.length - 1]);
+    const bodyNodes = [];
+    (function walk(n) { (n._children || []).forEach((c) => { if (String(c.className).includes('chat-md')) bodyNodes.push(c); walk(c); }); })(els['chat-output']);
+    assert(bodyNodes.length === 1, 'expected one .chat-md body node');
+    assert(bodyNodes[0]._html.startsWith('<md>'), 'body node not markdown-rendered: ' + bodyNodes[0]._html.slice(0, 40));
+  });
+  mdCalls = [];
   await check('shows metrics after done (tokens + duration)', () => {
     const st = els['chat-status'].textContent;
     assert(st.includes('42'), 'token count missing in: ' + st);
@@ -191,6 +208,10 @@ async function main() {
   await global.Pages.chat.sendMessage();
   await check('stream error event renders error line in transcript', () => {
     assert(els['chat-output']._html.includes('model not found'), 'error not rendered');
+  });
+  await check('partial reply persisted through markdown pipeline', () => {
+    // the "partial" delta was rendered before the error arrived
+    assert(mdCalls.some((c) => c === 'partial'), 'partial delta not rendered');
   });
 
   // ---- HTTP-level error (no auth etc.) ----

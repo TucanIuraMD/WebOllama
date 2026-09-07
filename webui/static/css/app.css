@@ -231,6 +231,41 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
 }
 @keyframes chat-blink { to { visibility: hidden; } }
 
+/* ---- Chat v3 (markdown replies) ---- */
+.chat-md { display: block; }
+.chat-md p { margin: 0 0 6px; }
+.chat-md p:last-child { margin-bottom: 0; }
+.chat-md h1, .chat-md h2, .chat-md h3, .chat-md h4 {
+  margin: 10px 0 4px; line-height: 1.3; color: var(--text);
+}
+.chat-md h1:first-child, .chat-md h2:first-child, .chat-md h3:first-child { margin-top: 0; }
+.chat-md h1 { font-size: 1.25em; border-bottom: 1px solid var(--border-2); padding-bottom: 3px; }
+.chat-md h2 { font-size: 1.15em; }
+.chat-md h3, .chat-md h4 { font-size: 1.05em; }
+.chat-md ul, .chat-md ol { margin: 4px 0 8px; padding-left: 22px; }
+.chat-md li { margin: 2px 0; }
+.chat-md blockquote {
+  margin: 6px 0; padding: 4px 10px; border-left: 3px solid var(--accent);
+  background: rgba(255, 255, 255, .04); color: var(--text-dim);
+}
+.chat-md code {
+  font-family: var(--mono); font-size: .95em; color: #e8c46a;
+  background: rgba(255, 255, 255, .07); border-radius: 4px; padding: 1px 5px;
+}
+.chat-md pre {
+  margin: 8px 0; padding: 10px 12px; overflow-x: auto;
+  background: #04060a; border: 1px solid var(--border-2); border-radius: 6px;
+}
+.chat-md pre code {
+  display: block; padding: 0; background: none; color: #c9d4e6;
+  font-size: 12px; line-height: 1.5; white-space: pre;
+}
+.chat-md a { color: var(--accent); text-decoration: underline; }
+.chat-md table { border-collapse: collapse; margin: 8px 0; }
+.chat-md th, .chat-md td { border: 1px solid var(--border-2); padding: 4px 8px; }
+.chat-md th { background: rgba(255, 255, 255, .05); }
+.chat-md hr { border: none; border-top: 1px solid var(--border-2); margin: 10px 0; }
+
 /* ---- Logs ---- */
 .log-view {
   background: #05070b; border: 1px solid var(--border); border-radius: 8px;

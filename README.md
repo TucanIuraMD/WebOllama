@@ -35,6 +35,7 @@ Real screenshots go in [`docs/images/`](docs/images/) and are referenced here. *
 ### Chat
 - Streaming conversation with any Ollama model (SSE: tokens appear as they are generated)
 - Multi-turn history kept in state, Stop button (AbortController), generation cursor
+- **Markdown rendering** in replies (marked + DOMPurify, sanitized — scripts/js-URLs stripped)
 - Completion metrics: model, generated tokens, duration; in-transcript error rendering
 
 ### Agents

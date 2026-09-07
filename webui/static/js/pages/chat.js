@@ -79,19 +79,20 @@
     out.innerHTML += `\n<span class="prompt">You</span>\n${esc(text)}\n`;
     out.scrollTop = out.scrollHeight;
 
-    // Streaming reply: create the assistant node once, append deltas into it.
-    const replyNode = document.createElement("span");
-    replyNode.className = "ok";
+    // Streaming reply: header + markdown body node; deltas append to the
+    // raw text buffer and re-render through the markdown pipeline.
     const head = document.createElement("span");
     head.textContent = "Assistant";
     head.className = "prompt";
     out.appendChild(head);
     out.appendChild(document.createTextNode("\n"));
-    out.appendChild(replyNode);
+    const bodyNode = document.createElement("span");
+    bodyNode.className = "ok chat-md";
+    out.appendChild(bodyNode);
     const cursor = document.createElement("span");
     cursor.className = "chat-cursor";
     cursor.textContent = "▍";
-    replyNode.appendChild(cursor);
+    bodyNode.appendChild(cursor);
     out.scrollTop = out.scrollHeight;
 
     setBusy(true, input, sendBtn);
@@ -136,8 +137,11 @@
             if (d.content) {
               reply += d.content;
               cursor.remove();
-              replyNode.appendChild(document.createTextNode(d.content));
-              replyNode.appendChild(cursor);
+              // Re-render the accumulated buffer as Markdown (sanitized).
+              // Re-parse per delta is fine at chat scale and keeps the
+              // visible output consistent with the final rendering.
+              bodyNode.innerHTML = renderMarkdown(reply);
+              bodyNode.appendChild(cursor);
               out.scrollTop = out.scrollHeight;
             }
           } catch { /* malformed chunk — skip */ }
@@ -187,6 +191,9 @@
       }
     } finally {
       cursor.remove();
+      // Final markdown render without the cursor (also normalizes any
+      // trailing partial syntax the last delta may have left open).
+      if (reply) bodyNode.innerHTML = renderMarkdown(reply);
       setBusy(false, input, sendBtn);
       aborter = null;
       out.scrollTop = out.scrollHeight;
