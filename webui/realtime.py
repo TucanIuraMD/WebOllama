@@ -32,6 +32,7 @@ class RealtimeService:
         self.jobs = jobs
         self.ws_broadcast = ws_broadcast
         self._tasks: list[asyncio.Task] = []
+        self._gpu_energy = None  # GpuEnergySampler (started/stopped with us)
         self.last_snapshot: dict = {}
         self._snapshot_lock = asyncio.Lock()
         # cache Ollama status between snapshots (cheap refresh)
@@ -44,11 +45,28 @@ class RealtimeService:
             asyncio.create_task(self._realtime_loop(), name="realtime"),
             asyncio.create_task(self._metrics_loop(), name="metrics"),
         ]
+        # GPU energy sampler (v1.1): 0.5 s NVML reads into a RAM buffer, ONE
+        # aggregated DB point per 10 s — own lifecycle, failure-isolated.
+        try:
+            from .gpu_energy import get_gpu_energy_sampler
+            self._gpu_energy = get_gpu_energy_sampler()
+            await self._gpu_energy.start()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("gpu energy sampler failed to start: %s", exc)
 
     async def stop(self) -> None:
         for t in self._tasks:
             t.cancel()
         await asyncio.gather(*self._tasks, return_exceptions=True)
+        if self._gpu_energy is not None:
+            try:
+                await self._gpu_energy.stop()  # flushes the last measured interval
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.debug("gpu energy sampler stop failed: %s", exc)
 
     async def _ollama_status(self) -> dict:
         now = time.time()
@@ -142,6 +160,15 @@ class RealtimeService:
             try:
                 await self.build_snapshot(persist=True)
                 await self.db.prune_old_metrics()
+                # Electricity v1: record host power telemetry on the same cadence
+                # (its own service; failure must not break GPU/system history)
+                try:
+                    from .electricity import get_electricity_service
+                    await get_electricity_service().record()
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.debug("electricity record failed: %s", exc)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:

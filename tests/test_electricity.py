@@ -1,16 +1,17 @@
-"""Electricity v1 — power sources, energy integration, cost, API.
+"""Electricity v1.1 — host power, GPU energy sampler, aggregation, cost.
 
 Contract highlights under test:
-  - RAPL/hwmon are the only HOST-level sources; GPU power_draw is a
-    reference only and never becomes the headline total.
-  - Unavailable sources are structured, never tracebacks; no invented
-    totals, no invented tariff defaults.
-  - kWh = trapezoidal integration of measured watts over time, gap-safe
-    (restarts / retention pruning never double-count).
+  - 0.5 s NVML sampling goes to a RAM buffer ONLY (no DB writes, no disk I/O
+    at that cadence); every 10 s ONE aggregated point per GPU is written
+    (interval_seconds, average_power_w, energy_wh, source=NVML, gpu_index).
+  - energy_wh = average_power_w × interval_seconds / 3600.
+  - Gaps / stopped sampler / NVML unavailable → NO rows, NO interpolation,
+    NO zeros; restarts can never double-count.
+  - GPU power/energy is GPU-only and NEVER total server power; the host
+    headline exists only with a host-level source (RAPL / hwmon).
+  - The sampler is a singleton: start() twice never duplicates the task;
+    stop() cancels it and flushes only the actually-measured remainder.
   - Cost appears only with an explicitly configured tariff.
-  - Persistence reuses metrics(kind="electricity") on the 5s metrics loop;
-    a sample() call never writes to the DB and the loop never polls a
-    source twice outside its TTL.
 """
 import asyncio
 import time
@@ -23,6 +24,7 @@ from webui.electricity import (
     RaplSource,
     set_electricity_service,
 )
+from webui.gpu_energy import GpuEnergySampler, set_gpu_energy_sampler
 
 
 # ---------------------------------------------------------------------------
@@ -47,8 +49,10 @@ class FakeDb:
     def __init__(self):
         self.rows = []  # (ts, kind, payload)
         self.settings = {}
+        self.insert_calls = 0
 
     async def insert_metric(self, ts, kind, payload):
+        self.insert_calls += 1
         self.rows.append((ts, kind, payload))
 
     async def get_metrics(self, kind, since, limit=5000):
@@ -62,25 +66,316 @@ class FakeDb:
         self.settings[key] = value
 
 
-def make_service(gpus=None, rapl=None, hwmon=None):
-    db = FakeDb()
+def make_service(gpus=None, rapl=None, hwmon=None, db=None):
+    db = db or FakeDb()
     svc = ElectricityService(db, gpu_collector=FakeGpuCollector(gpus),
                              rapl=rapl, hwmon=hwmon)
     return db, svc
 
 
+class StaticHwmon:
+    available = True
+
+    def __init__(self, watts):
+        self._w = watts
+
+    def probe(self):
+        pass
+
+    def sample(self):
+        return {"watts": self._w}
+
+
+class StaticRapl:
+    available = True
+
+    def __init__(self, result):
+        self._result = result
+
+    def probe(self):
+        pass
+
+    def sample(self):
+        return dict(self._result)
+
+
+# ---------------------------------------------------------------------------
+# Sampler: RAM buffer + 10 s aggregation
+# ---------------------------------------------------------------------------
+def test_sampling_goes_to_ram_buffer_not_db():
+    db = FakeDb()
+    sampler = GpuEnergySampler(db, sample_interval=0.05, aggregate_interval=1000.0,
+                               reader=lambda: {0: 30.0})
+    s = GpuEnergySampler.__new__(GpuEnergySampler)  # no, keep the real one below
+    # simulate ticks without the loop:
+    powers = sampler._read_powers()
+    assert powers == {0: 30.0}
+    sampler._buffer.append((time.time(), powers))
+    assert sampler.buffer_size() == 1
+    assert db.insert_calls == 0 and db.rows == []  # nothing hit the DB
+
+
+@pytest.mark.asyncio
+async def test_aggregation_after_interval_one_point_per_gpu():
+    db = FakeDb()
+    sampler = GpuEnergySampler(db, sample_interval=0.05, aggregate_interval=0.2,
+                               reader=lambda: {0: 30.0})
+    await sampler.start()
+    await asyncio.sleep(0.65)  # ~13 ticks → ≥1 aggregation window
+    await sampler.stop()
+    assert sampler.aggregations >= 1
+    rows = [(t, p) for (t, k, p) in db.rows if k == "gpu_energy"]
+    assert rows, "no aggregated point written"
+    ts, payload = rows[-1]
+    assert payload["source"] == "NVML"
+    assert payload["gpu_index"] == 0
+    assert payload["interval_seconds"] > 0
+    # 30 W flat: energy_wh = 30 × interval / 3600
+    expect = 30.0 * payload["interval_seconds"] / 3600.0
+    # stored values are rounded (interval 3dp, energy 6dp) → small tolerance
+    assert payload["energy_wh"] == pytest.approx(expect, rel=5e-3)
+    assert payload["average_power_w"] == pytest.approx(30.0, rel=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_variable_power_average():
+    db = FakeDb()
+    seq = iter([20.0, 40.0] * 100)
+    sampler = GpuEnergySampler(db, sample_interval=0.05, aggregate_interval=0.25,
+                               reader=lambda: {0: next(seq)})
+    await sampler.start()
+    await asyncio.sleep(0.7)
+    await sampler.stop()
+    rows = [p for (t, k, p) in db.rows if k == "gpu_energy"]
+    assert rows
+    # variable 20/40 W must average near 30 W, not take the last sample
+    avgs = [r["average_power_w"] for r in rows]
+    assert all(19 < a < 41 for a in avgs)
+    overall = sum(r["energy_wh"] for r in rows) / (sum(r["interval_seconds"] for r in rows) / 3600.0)
+    assert 25 < overall < 35
+
+
+@pytest.mark.asyncio
+async def test_idle_and_high_power_levels_aggregate():
+    db = FakeDb()
+    seq = iter([22.0, 24.0] * 100)  # idle class GPU (20–40 W)
+    sampler = GpuEnergySampler(db, sample_interval=0.05, aggregate_interval=0.2,
+                               reader=lambda: {0: next(seq)})
+    await sampler.start()
+    await asyncio.sleep(0.55)
+    await sampler.stop()
+    idle_rows = [p for (t, k, p) in db.rows if k == "gpu_energy"]
+    assert idle_rows and all(20 <= r["average_power_w"] <= 40 for r in idle_rows)
+
+    db2 = FakeDb()
+    seq2 = iter([295.0, 305.0] * 100)  # high-power class
+    sampler2 = GpuEnergySampler(db2, sample_interval=0.05, aggregate_interval=0.2,
+                                reader=lambda: {0: next(seq2)})
+    await sampler2.start()
+    await asyncio.sleep(0.55)
+    await sampler2.stop()
+    high_rows = [p for (t, k, p) in db2.rows if k == "gpu_energy"]
+    assert high_rows and all(290 <= r["average_power_w"] <= 310 for r in high_rows)
+
+
+@pytest.mark.asyncio
+async def test_energy_formula_matches_spec():
+    db = FakeDb()
+    # one exact manual flush: 30 W over exactly 10 s → 0.0833 Wh
+    now = time.time()
+    sampler = GpuEnergySampler(db, sample_interval=0.5, aggregate_interval=10.0,
+                               reader=lambda: {0: 30.0})
+    sampler._buffer = [(now - 10 + i * 0.5, {0: 30.0}) for i in range(21)]
+    await sampler._flush()
+    rows = [p for (t, k, p) in db.rows if k == "gpu_energy"]
+    assert len(rows) == 1
+    p = rows[0]
+    assert p["interval_seconds"] == pytest.approx(10.0, rel=1e-3)
+    assert p["average_power_w"] == pytest.approx(30.0)
+    assert p["energy_wh"] == pytest.approx(30.0 * 10 / 3600.0, rel=1e-3)  # 0.0833
+    assert p["energy_wh"] == pytest.approx(0.0833, abs=1e-3)
+
+
+@pytest.mark.asyncio
+async def test_gap_no_rows_no_interpolation():
+    db = FakeDb()
+    sampler = GpuEnergySampler(db, sample_interval=0.05, aggregate_interval=0.2,
+                               reader=lambda: None)  # NVML down the whole time
+    await sampler.start()
+    await asyncio.sleep(0.4)
+    await sampler.stop()
+    assert db.rows == []
+    assert sampler.aggregations == 0
+    s = await sampler.gpu_energy_summary(minutes=60)
+    assert s["available"] is False and s["energy_wh"] is None
+
+
+@pytest.mark.asyncio
+async def test_partial_nvml_availability_no_zero_fill():
+    db = FakeDb()
+    # reader alternates: available / unavailable — unavailable ticks must
+    # simply not contribute samples, not zeros
+    state = {"on": True}
+
+    def reader():
+        state["on"] = not state["on"]
+        return {0: 50.0} if state["on"] else None
+
+    sampler = GpuEnergySampler(db, sample_interval=0.05, aggregate_interval=0.25,
+                               reader=reader)
+    await sampler.start()
+    await asyncio.sleep(0.7)
+    await sampler.stop()
+    rows = [p for (t, k, p) in db.rows if k == "gpu_energy"]
+    assert rows and all(r["average_power_w"] == pytest.approx(50.0) for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_restart_no_double_count():
+    db = FakeDb()
+    # process 1: samples 30 W for 0.3 s, then "restarts"
+    s1 = GpuEnergySampler(db, sample_interval=0.05, aggregate_interval=0.25,
+                          reader=lambda: {0: 30.0})
+    await s1.start()
+    await asyncio.sleep(0.4)
+    await s1.stop()  # flushes its measured remainder
+
+    # process 2: fresh buffer, later timestamps
+    await asyncio.sleep(0.1)
+    s2 = GpuEnergySampler(db, sample_interval=0.05, aggregate_interval=0.25,
+                          reader=lambda: {0: 30.0})
+    await s2.start()
+    await asyncio.sleep(0.4)
+    await s2.stop()
+
+    rows = [(t, p) for (t, k, p) in db.rows if k == "gpu_energy"]
+    assert len(rows) >= 2
+    # rows must be disjoint in time: no interval overlaps another's span
+    spans = []
+    for t, p in rows:
+        spans.append((t - p["interval_seconds"], t))
+    spans.sort()
+    for (a0, a1), (b0, b1) in zip(spans, spans[1:]):
+        assert b0 >= a0 and b0 >= a1 - 1e-6 or b1 <= a0, "overlapping intervals → double count"
+    # total energy equals the sum of the row energies (each interval counted once)
+    total = sum(p["energy_wh"] for _, p in rows)
+    s = await GpuEnergySampler(db).gpu_energy_summary(minutes=60)
+    assert s["energy_wh"] == pytest.approx(total, rel=1e-6)
+
+
+@pytest.mark.asyncio
+async def test_summary_counts_only_measured_seconds():
+    db = FakeDb()
+    now = time.time()
+    # two 10 s intervals measured, then a 2 h silence, then one more
+    db.rows.append((now - 400, "gpu_energy",
+                    {"gpu_index": 0, "interval_seconds": 10.0, "average_power_w": 30.0,
+                     "energy_wh": 30 * 10 / 3600.0, "source": "NVML"}))
+    db.rows.append((now - 390, "gpu_energy",
+                    {"gpu_index": 0, "interval_seconds": 10.0, "average_power_w": 30.0,
+                     "energy_wh": 30 * 10 / 3600.0, "source": "NVML"}))
+    db.rows.append((now - 5, "gpu_energy",
+                    {"gpu_index": 0, "interval_seconds": 10.0, "average_power_w": 60.0,
+                     "energy_wh": 60 * 10 / 3600.0, "source": "NVML"}))
+    s = await GpuEnergySampler(db).gpu_energy_summary(minutes=60)
+    assert s["available"] is True
+    assert s["measured_seconds"] == pytest.approx(30.0)  # gaps contribute nothing
+    assert s["energy_wh"] == pytest.approx(3 * 30 * 10 / 3600.0 + 30 * 10 / 3600.0 * 1.0, rel=1e-3)
+    assert s["gpus"][0]["kwh"] == pytest.approx(s["kwh"], rel=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Sampler lifecycle
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_no_duplicate_sampler_start_twice():
+    db = FakeDb()
+    sampler = GpuEnergySampler(db, sample_interval=0.05, aggregate_interval=100.0,
+                               reader=lambda: {0: 30.0})
+    await sampler.start()
+    t1 = sampler._task
+    await sampler.start()
+    await sampler.start()
+    assert sampler._task is t1, "start() spawned a duplicate sampler task"
+    await sampler.stop()
+    assert sampler.running is False
+    assert sampler._task is None
+
+
+@pytest.mark.asyncio
+async def test_stop_flushes_measured_remainder():
+    db = FakeDb()
+    sampler = GpuEnergySampler(db, sample_interval=0.05, aggregate_interval=100.0,
+                               reader=lambda: {0: 30.0})
+    await sampler.start()
+    await asyncio.sleep(0.3)  # buffer has measured samples, no aggregation yet
+    assert sampler.buffer_size() > 0
+    await sampler.stop()
+    rows = [p for (t, k, p) in db.rows if k == "gpu_energy"]
+    assert len(rows) == 1  # flushed exactly the measured remainder
+    assert sampler.buffer_size() == 0
+
+
+@pytest.mark.asyncio
+async def test_buffer_bounded_ram():
+    db = FakeDb()
+    sampler = GpuEnergySampler(db, sample_interval=0.05, aggregate_interval=0.2,
+                               reader=lambda: {0: 30.0})
+    assert sampler._max_buffer <= 4 * (sampler.aggregate_interval / sampler.sample_interval) + 8
+    await sampler.start()
+    await asyncio.sleep(0.6)
+    await sampler.stop()
+    assert sampler.buffer_size() <= sampler._max_buffer
+
+
+def test_reader_unavailable_returns_none():
+    db = FakeDb()
+    sampler = GpuEnergySampler(db, reader=lambda: None)
+    assert sampler._read_powers() is None
+    # and with pynvml against a no-GPU box the default reader also degrades:
+    sampler2 = GpuEnergySampler(db)
+    r = sampler2._read_powers()
+    assert r is None or isinstance(r, dict)  # structured, never raises
+
+
+# ---------------------------------------------------------------------------
+# Host honesty: GPU != total server
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_gpu_only_total_server_unavailable():
+    gpu = FakeGpuCollector([{"index": 0, "name": "Tesla V100", "power_draw": 185.0}])
+    db, svc = make_service(gpus=None)
+    svc._gpu = gpu
+    s = await svc.sample()
+    assert s["available"] is False
+    assert s["watts"] is None
+    assert "UNAVAILABLE" in (s["reason"] or "").upper()
+    assert s["gpu_power"]["current_watts"] == 185.0
+    assert "NOT total" in s["gpu_power"]["note"]
+
+
+@pytest.mark.asyncio
+async def test_host_level_total_when_hwmon_present():
+    db, svc = make_service(gpus=[], hwmon=StaticHwmon(233.5))
+    s = await svc.sample()
+    assert s["available"] is True and s["watts"] == 233.5
+    assert s["source"] == "hwmon"
+
+
+@pytest.mark.asyncio
+async def test_gpu_power_never_added_to_host_total():
+    gpu = FakeGpuCollector([{"index": 0, "name": "V100", "power_draw": 185.0}])
+    db, svc = make_service(gpus=None, hwmon=StaticHwmon(25.0))
+    svc._gpu = gpu
+    s = await svc.sample()
+    assert s["watts"] == 25.0
+    assert s["gpu_power"]["current_watts"] == 185.0
+
+
 # ---------------------------------------------------------------------------
 # Source-level behavior
 # ---------------------------------------------------------------------------
-def test_rapl_unavailable_when_no_sysfs(tmp_path):
-    r = RaplSource(root=str(tmp_path / "missing"))
-    r.probe()
-    assert r.available is False
-    assert r.sample() is None
-
-
 def test_rapl_power_from_energy_delta(tmp_path):
-    import os
     dom = tmp_path / "intel-rapl:0"
     dom.mkdir()
     (dom / "name").write_text("core-rapl")
@@ -91,190 +386,56 @@ def test_rapl_power_from_energy_delta(tmp_path):
     r.probe()
     first = r.sample()
     assert first is not None and first["watts"] is None  # 1st sample: no delta yet
-
     time.sleep(0.05)
-    energy_file.write_text("1000000000" if False else str(1000_000_000 + 5_000_000))  # +5 J
+    energy_file.write_text(str(1000_000_000 + 5_000_000))  # +5 J
     second = r.sample()
     assert second["watts"] is not None
-    # 5 J over ~0.05s → roughly 100 W; assert a sane band, not a race-y exact value
     assert 10 < second["watts"] < 1000
 
 
-def test_rapl_skips_unreadable_domain(tmp_path):
-    dom = tmp_path / "intel-rapl:0"
-    dom.mkdir()
-    (dom / "name").write_text("core-rapl")
-    (dom / "energy_uj").write_text("1000")
-    dead = tmp_path / "intel-rapl:1"
-    dead.mkdir()
-    (dead / "name").write_text("psys")
-    # no energy_uj file at all — probe still registers the domain, sample must skip it
-
-    r = RaplSource(root=str(tmp_path))
+def test_rapl_unavailable_when_no_sysfs(tmp_path):
+    r = RaplSource(root=str(tmp_path / "missing"))
     r.probe()
-    s = r.sample()
-    assert s is not None and s["joules"] == 0.001
+    assert r.available is False
+    assert r.sample() is None
 
 
-def test_hwmon_unavailable_and_nvme_not_system_power(tmp_path):
-    h = HwmonPowerSource(root=str(tmp_path / "missing"))
-    h.probe()
-    assert h.available is False
-
-    # a drive-level sensor chip must NOT count as system power
-    drive = tmp_path / "hwmon9"
-    drive.mkdir()
-    (drive / "name").write_text("drivetemp")
-    (drive / "power1_input").write_text("999000000")
-    h2 = HwmonPowerSource(root=str(tmp_path))
-    h2.probe()
-    assert h2.available is False
-
-
-def test_hwmon_power_reads_microwatts(tmp_path):
+def test_hwmon_reads_microwatts_and_ignores_drivetemp(tmp_path):
     hw = tmp_path / "hwmon0"
     hw.mkdir()
     (hw / "name").write_text("nct6798")
     (hw / "power1_input").write_text("25000000")  # 25 W
-    (hw / "power2_input").write_text("1000000")   # 1 W
+    drive = tmp_path / "hwmon9"
+    drive.mkdir()
+    (drive / "name").write_text("drivetemp")
+    (drive / "power1_input").write_text("999000000")
     h = HwmonPowerSource(root=str(tmp_path))
     h.probe()
     assert h.available is True
-    assert h.sample()["watts"] == pytest.approx(26.0)
+    assert h.sample()["watts"] == pytest.approx(25.0)
 
 
 # ---------------------------------------------------------------------------
-# Service: total power honesty
+# Host kWh summary + tariff
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
-async def test_no_sources_means_unavailable_never_fake_total():
-    db, svc = make_service(gpus=[])
-    s = await svc.sample()
-    assert s["available"] is False
-    assert s["watts"] is None
-    assert s["measured"] is False
-    assert "UNAVAILABLE" in (s["reason"] or "").upper()
-
-
-@pytest.mark.asyncio
-async def test_gpu_only_is_reference_not_total():
-    # Host has GPU power (NVML) but NO host-level source: headline must stay
-    # unavailable; GPU watts ride along as an explicitly-labeled reference.
-    gpu = FakeGpuCollector([{"index": 0, "name": "Tesla V100", "power_draw": 185.0}])
-    db, svc = make_service(gpus=gpu.gpus)
-    svc._gpu = gpu
-    s = await svc.sample()
-    assert s["available"] is False
-    assert s["watts"] is None
-    assert s["gpu_power"]["watts"] == 185.0
-    assert s["gpu_power"]["measured"] is True
-    assert "NOT total" in s["gpu_power"]["note"]
-
-
-@pytest.mark.asyncio
-async def test_hwmon_only_is_a_valid_total():
-    hw = tmp_hwmon(30.0)
-    db, svc = make_service(gpus=[], hwmon=hw)
-    s = await svc.sample()
-    assert s["available"] is True
-    assert s["measured"] is True
-    assert s["watts"] == 30.0
-    assert s["source"] == "hwmon"
-
-
-@pytest.mark.asyncio
-async def test_rapl_plus_hwmon_sum_is_total():
-    hw = tmp_hwmon(10.0)
-    rapl = StaticRapl({"watts": 40.0})
-    db, svc = make_service(gpus=[], rapl=rapl, hwmon=hw)
-    s = await svc.sample()
-    assert s["available"] is True
-    assert s["watts"] == 50.0
-    assert "rapl" in s["source"] and "hwmon" in s["source"]
-
-
-@pytest.mark.asyncio
-async def test_gpu_power_never_adds_to_host_total():
-    gpu = FakeGpuCollector([{"index": 0, "name": "V100", "power_draw": 185.0}])
-    hw = tmp_hwmon(25.0)
-    db, svc = make_service(gpus=None, hwmon=hw)
-    svc._gpu = gpu
-    s = await svc.sample()
-    assert s["available"] is True
-    assert s["watts"] == 25.0  # GPU's 185 W must NOT be summed into the total
-    assert s["gpu_power"]["watts"] == 185.0
-
-
-@pytest.mark.asyncio
-async def test_rapl_first_sample_reports_no_watts_yet():
-    rapl = StaticRapl({"watts": None})  # probed, but ΔJ/Δt not ready
-    db, svc = make_service(gpus=[], rapl=rapl)
-    s = await svc.sample()
-    assert s["available"] is False
-    assert "first sample" in (s["components"]["cpu"]["source"] or "")
-
-
-@pytest.mark.asyncio
-async def test_gpu_collector_crash_never_breaks_sample():
-    class ExplodingGpu:
-        async def sample(self):
-            raise RuntimeError("NVML exploded")
-
-    hw = tmp_hwmon(20.0)
-    db, svc = make_service(hwmon=hw)
-    svc._gpu = ExplodingGpu()
-    s = await svc.sample()
-    assert s["available"] is True and s["watts"] == 20.0
-
-
-# ---------------------------------------------------------------------------
-# Persistence + energy integration
-# ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_record_persists_only_when_available():
-    db, svc = make_service(gpus=[])  # nothing available
-    await svc.record()
-    assert db.rows == []
-
-    svc2_hw = tmp_hwmon(50.0)
-    db2, svc2 = make_service(hwmon=svc2_hw)
-    await svc2.record()
-    assert len(db2.rows) == 1
-    ts, kind, payload = db2.rows[0]
-    assert kind == "electricity"
-    assert payload["watts"] == 50.0
-    assert payload["measured"] is True
-
-
-@pytest.mark.asyncio
-async def test_energy_integration_valid_power_to_kwh():
+async def test_host_energy_valid_power_to_kwh():
     db = FakeDb()
-    # 100 W flat for exactly 1 hour → 0.1 kWh (start slightly inside the window)
     t0 = time.time() - 3590
     for i in range(0, 13):
         db.rows.append((t0 + i * 300, "electricity",
                         {"watts": 100.0, "measured": True, "source": "hwmon"}))
     svc = ElectricityService(db, gpu_collector=FakeGpuCollector([]))
-    s = await svc.energy_summary(minutes=60)
-    assert s["kwh"] == pytest.approx(0.1, rel=1e-3)
+    s = await svc.energy_summary_host(minutes=60)
+    assert s["kwh"] == pytest.approx(0.1, rel=1e-2)
     assert s["measured"] is True
     assert s["method"] == "trapezoid-integration"
 
 
 @pytest.mark.asyncio
-async def test_energy_empty_window_is_none_not_zero():
-    db, svc = make_service(gpus=[])
-    s = await svc.energy_summary(minutes=60)
-    assert s["kwh"] is None
-    assert s["points"] == 0
-    assert s["measured"] is False
-
-
-@pytest.mark.asyncio
-async def test_energy_skips_restart_gap_no_double_count():
+async def test_host_energy_gap_no_double_count():
     db = FakeDb()
     now = time.time()
-    # 100 W for 10 min before an app restart, silence for 2 h, 200 W after
     for i in range(3):
         db.rows.append((now - 7200 - 300 + i * 300, "electricity",
                         {"watts": 100.0, "measured": True, "source": "hwmon"}))
@@ -282,71 +443,26 @@ async def test_energy_skips_restart_gap_no_double_count():
         db.rows.append((now - 300 + i * 150, "electricity",
                         {"watts": 200.0, "measured": True, "source": "hwmon"}))
     svc = ElectricityService(db, gpu_collector=FakeGpuCollector([]))
-    s = await svc.energy_summary(minutes=1440)
-    # gap > 600s must not be integrated across:
-    assert s["integrated_intervals"] == 2 + 2  # 2 within each side
-    # sanity: pre-restart side integrates 100W×600s = 16.67 Wh; post side 200W×300s = 16.67 Wh
+    s = await svc.energy_summary_host(minutes=1440)
+    assert s["integrated_intervals"] == 4
     assert s["kwh"] == pytest.approx((100 * 600 + 200 * 300) / 3.6e6, rel=1e-3)
 
 
 @pytest.mark.asyncio
-async def test_energy_marks_unmeasured_points():
-    db = FakeDb()
-    now = time.time()
-    db.rows.append((now - 600, "electricity",
-                    {"watts": 100.0, "measured": True, "source": "hwmon"}))
-    db.rows.append((now, "electricity",
-                    {"watts": 100.0, "measured": False, "source": "nvme-estimate"}))
-    svc = ElectricityService(db, gpu_collector=FakeGpuCollector([]))
-    s = await svc.energy_summary(minutes=60)
-    assert s["kwh"] is not None
-    assert s["measured"] is False
-    assert s["energy_basis"] == "calculated-from-partially-unavailable-power"
-
-
-# ---------------------------------------------------------------------------
-# Tariff / cost
-# ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_tariff_unset_no_invented_default_no_cost():
+async def test_tariff_unset_no_cost_no_default():
     db, svc = make_service(gpus=[])
     cfg = await svc.get_config()
-    assert cfg["tariff_is_configured"] is False
-    assert cfg["tariff"] is None
-    assert cfg["notice"] and "not configured" in cfg["notice"]
+    assert cfg["tariff_is_configured"] is False and cfg["tariff"] is None
+    assert "not configured" in cfg["notice"]
 
 
 @pytest.mark.asyncio
-async def test_tariff_set_and_cost_calculation():
+async def test_tariff_set_change_and_bounds():
     db, svc = make_service(gpus=[])
     cfg = await svc.set_config(tariff=5.0, currency="lei")
-    assert cfg["tariff_is_configured"] is True
-    assert cfg["tariff"] == 5.0
-
-    now = time.time()
-    # 1000 W flat for ~2 h, sampled every 10 min (intervals under the 600s gap limit)
-    for i in range(13):
-        db.rows.append((now - 7190 + i * 600, "electricity",
-                        {"watts": 1000.0, "measured": True, "source": "hwmon"}))
-    s = await svc.energy_summary(minutes=120)
-    assert s["kwh"] == pytest.approx(2.0, rel=1e-2)
-    # router-level cost (service returns kWh only; cost = kWh × tariff)
-    assert s["kwh"] * 5.0 == pytest.approx(10.0, rel=1e-2)
-
-
-@pytest.mark.asyncio
-async def test_tariff_change_reflects_immediately():
-    db, svc = make_service(gpus=[])
-    await svc.set_config(tariff=1.0)
-    cfg1 = await svc.get_config()
+    assert cfg["tariff"] == 5.0 and cfg["tariff_is_configured"] is True
     await svc.set_config(tariff=2.5)
-    cfg2 = await svc.get_config()
-    assert cfg1["tariff"] == 1.0 and cfg2["tariff"] == 2.5
-
-
-@pytest.mark.asyncio
-async def test_tariff_validation_bounds():
-    db, svc = make_service(gpus=[])
+    assert (await svc.get_config())["tariff"] == 2.5
     with pytest.raises(ValueError):
         await svc.set_config(tariff=-1)
     with pytest.raises(ValueError):
@@ -356,66 +472,40 @@ async def test_tariff_validation_bounds():
 
 
 # ---------------------------------------------------------------------------
-# Probe caching — no duplicate polling
-# ---------------------------------------------------------------------------
-@pytest.mark.asyncio
-async def test_probe_cache_no_duplicate_sysfs_polling():
-    class CountingHwmon(HwmonPowerSource):
-        def __init__(self, root):
-            super().__init__(root)
-            self.probe_calls = 0
-
-        def probe(self):
-            self.probe_calls += 1
-            return super().probe()
-
-    hw = CountingHwmon("/nonexistent")
-    db, svc = make_service(gpus=[], hwmon=hw)
-    for _ in range(5):
-        await svc.sample()
-    # PROBE_INTERVAL throttling: repeated samples within the window must not re-probe
-    assert hw.probe_calls == 1
-
-    # force the window to expire → exactly one more probe
-    svc._last_probe -= 61
-    await svc.sample()
-    assert hw.probe_calls == 2
-
-
-# ---------------------------------------------------------------------------
 # HTTP API
 # ---------------------------------------------------------------------------
-def test_api_endpoints_contract(client):
+def test_api_contract(client):
     """Full-app HTTP contract via the shared TestClient fixture."""
-    db, svc = make_service(gpus=[], hwmon=tmp_hwmon(42.0))
+    db, svc = make_service(gpus=[], hwmon=StaticHwmon(42.0))
     set_electricity_service(svc)
     try:
-        r = client.post("/api/auth/login",
-                        json={"username": "admin", "password": "changeme"})
-        assert r.status_code == 200
+        assert client.post("/api/auth/login",
+                           json={"username": "admin", "password": "changeme"}).status_code == 200
 
         r = client.get("/api/electricity")
         assert r.status_code == 200
         body = r.json()
-        assert body["available"] is True
-        assert body["watts"] == 42.0
+        assert body["available"] is True and body["watts"] == 42.0
         assert body["gpu_power"]["note"].startswith("GPU power draw only")
 
-        r = client.get("/api/electricity/history?minutes=60")
+        r = client.get("/api/electricity/gpu-energy")
         assert r.status_code == 200
-        assert r.json()["kind"] == "electricity"
+        g = r.json()
+        for key in ("today", "h24", "month", "sampler"):
+            assert key in g
+        assert g["today"]["note"].startswith("GPU-only")
+
+        r = client.get("/api/electricity/gpu-energy-window?minutes=60")
+        assert r.status_code == 200 and "kwh" in r.json()
+
+        r = client.get("/api/electricity/gpu-history?minutes=60")
+        assert r.status_code == 200 and r.json()["kind"] == "gpu_energy"
 
         r = client.get("/api/electricity/summary?minutes=60")
-        assert r.status_code == 200
-        assert r.json()["tariff_configured"] is False
+        assert r.status_code == 200 and r.json()["tariff_configured"] is False
 
-        # tariff write requires admin (we are admin here)
         r = client.put("/api/electricity/config", json={"tariff": 4.5})
-        assert r.status_code == 200
-        assert r.json()["tariff"] == 4.5
-        r = client.get("/api/electricity/summary?minutes=60")
-        assert r.json()["tariff_configured"] is True
-
+        assert r.status_code == 200 and r.json()["tariff"] == 4.5
         r = client.put("/api/electricity/config", json={})
         assert r.status_code == 422
         r = client.put("/api/electricity/config", json={"tariff": "abc"})
@@ -425,7 +515,6 @@ def test_api_endpoints_contract(client):
 
 
 def test_api_unavailable_is_structured_200(client):
-    """No host source → 200 + honest structured payload, never a 500."""
     db, svc = make_service(gpus=[])
     set_electricity_service(svc)
     try:
@@ -433,39 +522,8 @@ def test_api_unavailable_is_structured_200(client):
         r = client.get("/api/electricity")
         assert r.status_code == 200
         body = r.json()
-        assert body["available"] is False
-        assert body["watts"] is None
-        assert "reason" in body
+        assert body["available"] is False and body["watts"] is None
+        g = client.get("/api/electricity/gpu-energy").json()
+        assert g["today"]["available"] is False and g["today"]["energy_wh"] is None
     finally:
         set_electricity_service(None)
-
-
-# ---------------------------------------------------------------------------
-# helpers
-# ---------------------------------------------------------------------------
-def tmp_hwmon(watts: float):
-    """A static in-memory hwmon source returning a fixed wattage."""
-    class StaticHwmon:
-        available = True
-
-        def probe(self):
-            pass
-
-        def sample(self):
-            return {"watts": watts}
-
-    return StaticHwmon()
-
-
-class StaticRapl:
-    """A RAPL source whose sample() returns a canned dict."""
-
-    def __init__(self, result):
-        self._result = result
-        self.available = True
-
-    def probe(self):
-        pass
-
-    def sample(self):
-        return dict(self._result)

@@ -1,17 +1,19 @@
-"""Electricity v1 endpoints — host power telemetry + energy history.
+"""Electricity v1.1 endpoints — host power + GPU energy history.
 
-GET  /api/electricity            — one live sample (never 500: structured
-                                   {"available": false, ...} when the host
-                                   has no power telemetry source).
-GET  /api/electricity/summary    — kWh over the retention window via
-                                   trapezoidal integration of the persisted
-                                   watts series + optional cost estimate.
-GET  /api/electricity/history    — raw persisted watts points (chart feed).
+GET  /api/electricity            — live host sample (never 500: structured
+                                   {"available": false, ...}) + GPU current W.
+GET  /api/electricity/gpu-energy — aggregated GPU energy: today / 24h / 30d
+                                   (+ per-GPU split, sampler state, gaps
+                                   reflected as measured_seconds only).
+GET  /api/electricity/gpu-history — aggregated gpu_energy points (chart feed).
+GET  /api/electricity/summary    — host kWh over a window (from the 5s host
+                                   power series) + optional cost.
 GET  /api/electricity/config     — tariff + currency (admin).
 PUT  /api/electricity/config     — set tariff/currency (admin, rate-limited).
 
 Local host only by design: no SSH, no remote agents. No sudo: all sources
-are world-readable sysfs / the existing NVML handle.
+are world-readable sysfs / the existing NVML handle. GPU values are always
+GPU-only and are never presented as total server power.
 """
 import logging
 import time
@@ -29,12 +31,64 @@ router = APIRouter(prefix="/api/electricity", tags=["electricity"])
 
 @router.get("")
 async def electricity(user: dict = Depends(current_user)):
-    """Current power draw of the host running WebOllama.
-
-    200 with a structured payload in every case; `available: false` carries
-    an honest `reason` when the host exposes no power source.
-    """
+    """Current host power draw + GPU current draw (reference only)."""
     return await get_electricity_service().sample()
+
+
+@router.get("/gpu-energy")
+async def gpu_energy(user: dict = Depends(current_user)):
+    """Aggregated GPU energy: today / 24h / 30d windows + sampler state.
+
+    Energy is calculated from measured GPU power over really measured
+    intervals (gaps contribute nothing). GPU-only — never total server.
+    """
+    svc = get_electricity_service()
+    out = await svc.gpu_energy_windows()
+    cfg = await svc.get_config()
+    out["tariff_configured"] = bool(cfg.get("tariff_is_configured"))
+    if cfg.get("tariff_is_configured"):
+        tariff = cfg["tariff"]
+        for key in ("today", "h24", "month"):
+            kwh = out[key].get("kwh")
+            if kwh is not None:
+                out[key]["cost"] = round(kwh * tariff, 4)
+                out[key]["currency"] = cfg["currency"]
+    else:
+        for key in ("today", "h24", "month"):
+            out[key]["cost_notice"] = "tariff not configured"
+    return out
+
+
+@router.get("/gpu-energy-window")
+async def gpu_energy_window(
+    minutes: int = Query(default=60, ge=1, le=1440),
+    user: dict = Depends(current_user),
+):
+    """Aggregated GPU energy for an arbitrary window (selected period)."""
+    svc = get_electricity_service()
+    s = await svc.gpu_energy.gpu_energy_summary(minutes=minutes)
+    cfg = await svc.get_config()
+    out = dict(s)
+    out["minutes"] = minutes
+    if cfg.get("tariff_is_configured") and out.get("kwh") is not None:
+        out["cost"] = round(out["kwh"] * cfg["tariff"], 4)
+        out["currency"] = cfg["currency"]
+    else:
+        out["cost_notice"] = "tariff not configured"
+    return out
+
+
+@router.get("/gpu-history")
+async def gpu_energy_history(
+    minutes: int = Query(default=60, ge=1, le=1440),
+    user: dict = Depends(current_user),
+):
+    """Aggregated gpu_energy points (one per ~10 s) for charts."""
+    db = Database.get()
+    since = time.time() - minutes * 60
+    rows = await db.get_metrics("gpu_energy", since)
+    return {"kind": "gpu_energy", "minutes": minutes, "points": rows,
+            "retention": HISTORY_RETENTION}
 
 
 @router.get("/summary")
@@ -42,9 +96,9 @@ async def electricity_summary(
     minutes: int = Query(default=60, ge=1, le=1440),
     user: dict = Depends(current_user),
 ):
-    """kWh (and optional cost) over the requested window, from history."""
+    """Host-level kWh (and optional cost) over the requested window."""
     svc = get_electricity_service()
-    summary = await svc.energy_summary(minutes=minutes)
+    summary = await svc.energy_summary_host(minutes=minutes)
     config = await svc.get_config()
     out = {**summary, "minutes": minutes,
            "retention_seconds": HISTORY_RETENTION,
@@ -61,7 +115,7 @@ async def electricity_history(
     minutes: int = Query(default=60, ge=1, le=1440),
     user: dict = Depends(current_user),
 ):
-    """Raw persisted watts points for charts."""
+    """Raw persisted host watts points for charts (5s cadence)."""
     db = Database.get()
     since = time.time() - minutes * 60
     rows = await db.get_metrics("electricity", since)

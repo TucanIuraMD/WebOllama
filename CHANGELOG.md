@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.4.1 (2026-09-08)
+
+### Changed
+
+- **Electricity v1.1 — GPU energy sampling pipeline + NVMe removal**: GPU
+  `power_draw` is now sampled every **0.5 s** via NVML into a bounded
+  **RAM-only buffer** (no DB writes, no disk I/O at that cadence); every
+  **10 s** the buffer is aggregated into **one** DB point per GPU —
+  `{gpu_index, interval_seconds, average_power_w, energy_wh, source: "NVML"}`
+  with `energy_wh = average_power_w × interval_seconds / 3600` self-consistent
+  against the stored values. Gaps (NVML down, sampler stopped) produce no
+  rows and are never zero-filled or interpolated; rows carry their own
+  measured interval and are time-disjoint, so restarts cannot double-count;
+  `stop()` flushes the last actually-measured partial interval. The sampler
+  is a singleton (idempotent `start()`, no duplicate tasks) started/stopped
+  with the realtime service. New endpoints `/api/electricity/gpu-energy`
+  (today / 24 h / month windows + sampler state), `/gpu-energy-window`
+  (selected period) and `/gpu-history` (chart feed). UI: GPU block with
+  current W, average W, energy today/24h/period/30d, per-GPU split,
+  measured-seconds, cost (only with a configured tariff, labeled
+  "calculated") — always labeled GPU-only, never total server power;
+  TOTAL SERVER stays unavailable without host-level telemetry (verified on
+  this host: RAPL denied even for uid 0, no hwmon power sensors). All NVMe
+  telemetry/temperature support is removed from the project (no collector,
+  no API/UI/tests/docs); drive-level sensors are excluded from host power
+  probing. 29 electricity tests (backend + frontend flows: 0.5 s sampling,
+  10 s aggregation, variable/idle/high power, energy formula, gaps, restart
+  no-double-count, RAM-buffer-only writes, GPU ≠ total, NVML unavailable,
+  tariff, no duplicate sampler). See `docs/ELECTRICITY-V1.md`.
+
 ## 1.4.0 (2026-09-08)
 
 ### Features

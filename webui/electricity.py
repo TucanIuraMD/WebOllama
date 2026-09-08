@@ -1,36 +1,36 @@
-"""Electricity v1 — host power telemetry + energy integration.
+"""Electricity v1.1 — host power telemetry + GPU energy integration.
 
-Scope (v1, LOCAL HOST ONLY — the machine running WebOllama; no SSH, no
-remote agents, no sudo, no external commands per sample):
+Scope (LOCAL HOST ONLY — the machine running WebOllama; no SSH, no remote
+agents, no sudo, no external commands per sample):
 
-  Measured sources (probed in order, first host-level source wins):
+  Host-level measured sources (headline `watts`; probed in order):
     1. RAPL  — /sys/class/powercap/intel-rapl*/energy_uj counters (Intel/AMD
-               CPUs). Power = ΔJ / Δt between consecutive samples. Note: on
-               many production kernels (and inside most containers/VMs) these
-               files are root-only (mode 0400) — unavailable is a FIRST-CLASS
-               outcome, never an error.
+               CPUs). Power = ΔJ / Δt between consecutive samples. Root-only
+               (0400) on many kernels/containers — unavailable is a
+               FIRST-CLASS outcome, never an error.
     2. hwmon — /sys/class/hwmon/hwmon*/power*_input (µW) platform sensors.
-    3. NVML  — per-GPU power_draw via the EXISTING GPUCollector (reuses the
-               same cached NVML handle the GPU page uses; no new polling).
 
-  HARD RULE: GPU power is NEVER presented as total server power. The
-  headline `watts` is non-None only when at least one HOST-level source
-  (RAPL or hwmon) is readable. GPU-only hosts report
-  available=false + a clearly-labeled GPU-only reference value.
+  GPU energy (separate, GPU-ONLY — never total server power):
+    3. NVML  — 0.5 s power_draw samples held in a RAM buffer by
+               GpuEnergySampler (webui/gpu_energy.py); every 10 s ONE
+               aggregated point (average W, energy Wh, measured interval)
+               lands in the existing metrics table (kind="gpu_energy").
+               No 0.5 s DB writes, no disk I/O at sampling cadence.
 
-  Integration: kWh over the retained metrics window via trapezoidal
-  integration of the persisted watts series. `measured` is true only when
-  every integrated point came from a measured host source.
+  HARD RULES:
+    - GPU power/energy is never presented as total server power. If no
+      host-level source exists, `available=false` + honest reason and the
+      GPU block stands alone, clearly labeled.
+    - kWh/Wh values are CALCULATED from measured power over really measured
+      intervals. Gaps (sampler stopped, NVML unavailable) contribute
+      NOTHING — never zero-filled, never interpolated, never double-counted
+      across restarts (each DB row carries its own interval; rows of one
+      process are disjoint; a restart starts a fresh buffer).
+    - Cost = energy × tariff ONLY with an explicitly configured tariff —
+      never an invented default.
 
-  Cost: kWh × tariff (settings), shown ONLY when the tariff is explicitly
-  configured — never an invented default.
-
-Design constraints honored:
-  - Light polling: tiny sysfs reads; source re-probe at most every
-    PROBE_INTERVAL seconds; NVML sampling rides the GPU collector's cache.
-  - Storage reuses the existing `metrics` table (kind="electricity") and
-    the existing prune_old_metrics retention — no schema change, no second
-    telemetry mechanism.
+  Storage reuses the existing `metrics` table + prune_old_metrics — no
+  schema change, no second telemetry mechanism.
 """
 import logging
 import time
@@ -152,16 +152,18 @@ class HwmonPowerSource:
 # Service
 # ---------------------------------------------------------------------------
 class ElectricityService:
-    """Aggregates power sources into one sample; persists + integrates kWh."""
+    """Host-level power sample + GPU energy summaries + tariff config."""
 
     def __init__(self, db,
                  gpu_collector=None,
                  rapl: Optional[RaplSource] = None,
-                 hwmon: Optional[HwmonPowerSource] = None) -> None:
+                 hwmon: Optional[HwmonPowerSource] = None,
+                 gpu_energy=None) -> None:
         self.db = db
         self._gpu = gpu_collector
         self.rapl = rapl or RaplSource()
         self.hwmon = hwmon or HwmonPowerSource()
+        self._gpu_energy = gpu_energy
         self._last_probe = 0.0
 
     # ---- collaborators ------------------------------------------------------
@@ -171,6 +173,13 @@ class ElectricityService:
             return self._gpu
         from .gpu_collector import get_gpu_collector
         return get_gpu_collector()
+
+    @property
+    def gpu_energy(self):
+        if self._gpu_energy is not None:
+            return self._gpu_energy
+        from .gpu_energy import get_gpu_energy_sampler
+        return get_gpu_energy_sampler()
 
     # ---- probing ------------------------------------------------------------
     def _probe(self) -> None:
@@ -206,9 +215,9 @@ class ElectricityService:
                 platform_section = {"watts": round(h["watts"], 2), "measured": True,
                                     "source": "hwmon"}
 
-        # 3) NVML GPU power via the shared collector — REFERENCE ONLY, never
-        #    the headline total by itself.
-        gpu_section = {"watts": None, "measured": False, "per_device": [],
+        # 3) NVML GPU power via the shared collector — CURRENT value only,
+        #    REFERENCE/summary role, never the headline total.
+        gpu_section = {"current_watts": None, "measured": False, "per_device": [],
                        "note": "GPU power draw only — NOT total server power"}
         try:
             g = await self.gpu.sample()
@@ -219,7 +228,7 @@ class ElectricityService:
                              "watts": w, "measured": w is not None})
             valid = [r["watts"] for r in rows if r["watts"] is not None]
             gpu_section.update({
-                "watts": round(sum(valid), 2) if valid else None,
+                "current_watts": round(sum(valid), 2) if valid else None,
                 "measured": bool(valid),
                 "per_device": rows,
             })
@@ -241,7 +250,7 @@ class ElectricityService:
             reason = ("no host-level power telemetry on this machine "
                       "(RAPL unreadable/denied, no hwmon power sensors) — "
                       "total server power is UNAVAILABLE; "
-                      "GPU power draw (if any) is shown separately and is NOT a total")
+                      "GPU power/energy (if any) is shown separately and is NOT a total")
 
         return {
             "available": available,
@@ -254,20 +263,57 @@ class ElectricityService:
             "ts": ts,
         }
 
-    # ---- persistence + integration -------------------------------------------
+    # ---- persistence (host series for kWh summaries) ---------------------------
     async def record(self) -> None:
-        """Persist one compact sample into metrics(kind='electricity')."""
+        """Persist one host-level power sample (metrics kind="electricity").
+
+        Called from the 5 s metrics loop. ONLY host-level watts are written
+        here; GPU 0.5 s samples never touch the DB (see GpuEnergySampler —
+        they live in RAM and land as 10 s aggregated gpu_energy rows).
+        """
         s = await self.sample()
-        if s["available"]:
+        if s["available"] and s["watts"] is not None:
             await self.db.insert_metric(s["ts"], "electricity", {
                 "watts": s["watts"],
-                "gpu_watts": s["gpu_power"].get("watts"),
-                "measured": s["measured"],
+                "measured": True,
                 "source": s["source"],
             })
 
-    async def energy_summary(self, minutes: int = 60) -> dict:
-        """Trapezoidal kWh integration over the retained watts series.
+    # ---- GPU energy summaries (aggregated rows, GPU-only) ----------------------
+    async def gpu_energy_windows(self) -> dict:
+        """GPU energy for today / 24h / 30d + sampler liveness.
+
+        Windows are independent integrations over aggregated gpu_energy rows;
+        "today" additionally clips to local midnight, so it can never span
+        more than the retention window. All values are calculated from
+        measured power over really measured intervals — gaps add nothing.
+        """
+        def _out(s):
+            return {k: s[k] for k in ("available", "energy_wh", "kwh",
+                                      "average_power_w", "measured_seconds",
+                                      "points", "gpus", "note")}
+
+        midnight = time.time() - (time.time() % 86400)  # UTC day boundary
+        # local-midnight clip for "energy today" (UTC day boundary — the
+        # retention-bounded approximation is stated in the docs)
+        midnight = time.time() - (time.time() % 86400)
+        today = _out(await self.gpu_energy.gpu_energy_summary(minutes=1440, since=midnight))
+        d24 = _out(await self.gpu_energy.gpu_energy_summary(minutes=1440))
+        d30 = _out(await self.gpu_energy.gpu_energy_summary(minutes=43200))
+        s = self.gpu_energy
+        return {
+            "today": today,
+            "h24": d24,
+            "month": d30,
+            "sampler": {"running": s.running,
+                        "last_error": s.last_error,
+                        "sample_interval": s.sample_interval,
+                        "aggregate_interval": s.aggregate_interval},
+        }
+
+    # ---- host energy summary (host-level series, not GPU) ----------------------
+    async def energy_summary_host(self, minutes: int = 60) -> dict:
+        """Host kWh via trapezoidal integration of the persisted watts series.
 
         `measured` is true only if EVERY integrated point was measured.
         Gaps larger than 600s (restarts, retention pruning) are skipped, so

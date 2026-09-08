@@ -1,19 +1,21 @@
-/* Electricity page — host power telemetry, energy history, cost estimate.
+/* Electricity page — host power telemetry, GPU energy, cost estimate.
  *
  * Data honesty contract (mirrors the backend):
- *  - `watts` is shown only when a HOST-level source (RAPL / hwmon) exists.
- *  - GPU power draw is displayed ONLY as a per-GPU reference and is clearly
- *    labeled "not total server power".
- *  - kWh is CALCULATED (integration), cost is CALCULATED (kWh × tariff);
- *    both are labeled as such, never as measurements.
- *  - No tariff configured → explicit "needs configuration" notice, no
- *    invented default.
- * Polls /api/electricity every 5s with a page-scoped timer (same pattern as
- * the Dashboard: single setInterval, cleared on re-render).
+ *  - Host `watts` is shown only when a HOST-level source (RAPL / hwmon)
+ *    exists; otherwise "TOTAL SERVER — data unavailable" with the reason.
+ *  - GPU power/energy is GPU-ONLY telemetry, always labeled as such and
+ *    never presented as total server power.
+ *  - GPU current W comes from the realtime GPU collector; average W / Wh
+ *    come from aggregated gpu_energy rows (10 s points, gaps excluded).
+ *  - kWh/Wh are CALCULATED; cost is CALCULATED (energy × tariff) and shown
+ *    only when the admin configured a tariff — never an invented default.
+ * Polls /api/electricity every 5s with a page-scoped timer (same pattern
+ * as the Dashboard: single setInterval, cleared on re-render). GPU energy
+ * windows refresh every 30s via the same single timer tick.
  */
 (function () {
   let elecTimer = null;
-  let chart = null;
+  let tickCount = 0;
 
   async function render(el) {
     if (elecTimer) { clearInterval(elecTimer); elecTimer = null; }
@@ -27,132 +29,181 @@
       return;
     }
     el.innerHTML = build(data);
-    wireActions(el);
-    drawChart();
-    const cfg = await loadConfig();
-    renderConfig(cfg);
-    elecTimer = setInterval(refresh, 5000);
+    wireActions();
+    await refreshGpuEnergy();
+    elecTimer = setInterval(tick, 5000);
   }
 
   function destroy() {
     if (elecTimer) { clearInterval(elecTimer); elecTimer = null; }
   }
 
-  async function refresh() {
+  async function tick() {
     if (App.state.currentPage !== "electricity") { destroy(); return; }
-    let data;
-    try { data = await API.get("/api/electricity"); } catch { return; }
-    const sec = document.getElementById("elec-live");
-    if (sec) sec.outerHTML = liveSection(data);
+    tickCount++;
+    const every6 = tickCount % 6 === 0; // ~30 s
+    try {
+      const data = await API.get("/api/electricity");
+      const sec = document.getElementById("elec-live");
+      if (sec) sec.outerHTML = liveSection(data);
+    } catch { /* transient — keep last good section */ }
+    if (every6) await refreshGpuEnergy();
   }
 
-  function build(data) {
-    return `
-      ${liveSection(data)}
-      <div class="card">
-        <div class="card-title">Energy history <span class="right text-faint" style="font-size:12px" id="elec-hist-meta"></span></div>
-        <div style="height:220px"><canvas id="elec-chart"></canvas></div>
-        <div id="elec-periods" style="margin-top:14px"></div>
-      </div>
-      <div class="card">
-        <div class="card-title">Tariff settings</div>
-        <div id="elec-config"><div class="text-dim">loading…</div></div>
-      </div>`;
-  }
-
+  // ---- host section -------------------------------------------------------
   function liveSection(data) {
     if (!data.available) {
       return `<div class="card" id="elec-live">
-        <div class="card-title">Current power</div>
+        <div class="card-title">Total server power</div>
         <div class="empty">
           <div class="big">⚡</div>
-          <b>Total server power: data unavailable</b>
+          <b>TOTAL SERVER — data unavailable</b>
           <div class="text-faint" style="margin-top:8px;max-width:640px">${esc(data.reason || "no host-level power telemetry source on this machine")}</div>
-          ${gpuRef(data)}
         </div>
       </div>`;
     }
     const c = data.components || {};
     return `<div class="card" id="elec-live">
-      <div class="card-title">Current power <span class="right status-pill status-on">measured · ${esc(data.source || "")}</span></div>
+      <div class="card-title">Total server power <span class="right status-pill status-on">measured · ${esc(data.source || "")}</span></div>
       <div class="grid grid-4">
         ${tile("Total server power", data.watts != null ? data.watts.toFixed(1) + " W" : "—")}
         ${tile("CPU (RAPL)", c.cpu && c.cpu.watts != null ? c.cpu.watts.toFixed(1) + " W" : "—")}
         ${tile("Platform (hwmon)", c.platform && c.platform.watts != null ? c.platform.watts.toFixed(1) + " W" : "—")}
-        ${tile("GPU draw (reference)", data.gpu_power && data.gpu_power.watts != null ? data.gpu_power.watts.toFixed(1) + " W" : "—")}
       </div>
-      <div class="text-faint" style="font-size:12px;margin-top:10px">GPU value is the sum of per-GPU power_draw — <b>not</b> total server power. Energy below is calculated by integrating measured power over time.</div>
+      <div class="text-faint" style="font-size:12px;margin-top:10px">Host-level telemetry only. GPU figures below are GPU-only and are <b>not</b> part of or equal to this total.</div>
     </div>`;
   }
 
-  function gpuRef(data) {
-    const gp = data.gpu_power;
-    if (!gp || gp.watts == null) return "";
-    const rows = (gp.per_device || []).map((d) =>
-      `<div class="detail-grid"><div class="k">GPU ${d.index ?? "?"} ${esc(d.name || "")}</div>
-       <div class="v mono">${d.watts != null ? d.watts.toFixed(1) + " W" : "—"}</div></div>`).join("");
-    return `<div style="margin-top:12px;max-width:640px;text-align:left">
-      <div class="text-faint" style="font-size:12px;margin-bottom:6px">GPU power draw (measured, reference only — NOT total server power):</div>${rows}</div>`;
+  // ---- GPU energy section ---------------------------------------------------
+  function gpuSection(g) {
+    const s = g && g.sampler || {};
+    const today = g && g.today || {};
+    const h24 = g && g.h24 || {};
+    const month = g && g.month || {};
+    const state = s.running
+      ? '<span class="right status-pill status-on">sampler running</span>'
+      : '<span class="right status-pill status-off">sampler stopped' + (s.last_error ? " — " + esc(s.last_error) : "") + '</span>';
+    return `<div class="card">
+      <div class="card-title">GPU energy ${state}</div>
+      <div class="grid grid-4">
+        ${tile("GPU current power", gpuCurrentW())}
+        ${tile("GPU average power", h24.average_power_w != null ? h24.average_power_w.toFixed(1) + " W" : "—", "24 h avg")}
+        ${tile("GPU energy today", fmtKwh(today), costLine(today))}
+        ${tile("GPU energy 24h", fmtKwh(h24), costLine(h24))}
+      </div>
+      <div class="grid grid-3" style="margin-top:10px">
+        ${tile("GPU energy 30d", fmtKwh(month), costLine(month))}
+        ${tile("Measured time 24h", h24.measured_seconds != null ? Math.round(h24.measured_seconds) + " s" : "—", "gaps excluded")}
+        ${tile("Energy basis", "calculated", "avg W × measured interval / 3600")}
+      </div>
+      <div class="text-faint" style="font-size:12px;margin-top:10px">
+        GPU-only telemetry (NVML, 0.5 s RAM-buffered samples → one aggregated DB point per 10 s).
+        <b>GPU energy is NOT total server energy.</b>
+        ${s.last_error && s.running ? " Last sampler error: " + esc(s.last_error) : ""}
+      </div>
+      <div id="elec-gpu-periods" style="margin-top:14px"></div>
+      <div id="elec-gpu-detail" style="margin-top:10px"></div>
+    </div>`;
   }
 
-  function tile(label, value) {
+  function gpuCurrentW() {
+    const snap = App.state.snapshot;
+    const gpus = snap && snap.gpu && snap.gpu.gpus || [];
+    let total = null;
+    const rows = gpus.map((g) => {
+      const w = g.power_draw;
+      if (w != null) total = (total || 0) + w;
+      return `<div class="detail-grid"><div class="k">GPU ${g.index ?? "?"} ${esc(g.name || "")}</div>
+        <div class="v mono">${w != null ? w.toFixed(1) + " W" : "—"}</div></div>`;
+    }).join("");
+    return rows
+      ? `<div class="mono" style="font-size:18px">${total != null ? total.toFixed(1) + " W" : "—"}</div>`
+      : '<div class="mono" style="font-size:18px">—</div>';
+  }
+
+  function fmtKwh(win) {
+    return win && win.kwh != null ? win.kwh.toFixed(4) + " kWh" : "—";
+  }
+
+  function costLine(win) {
+    if (!win) return "";
+    if (win.cost != null) return "cost " + win.cost.toFixed(2) + " " + esc(win.currency || "lei") + " (calculated)";
+    if (win.cost_notice) return "cost unavailable — tariff not configured";
+    return "";
+  }
+
+  function tile(label, value, sub) {
     return `<div class="metric-tile"><div class="metric-label">${label}</div>
-      <div class="metric-value mono" style="font-size:18px">${value}</div></div>`;
+      <div class="metric-value mono" style="font-size:18px">${value}</div>
+      ${sub ? `<div class="metric-sub">${sub}</div>` : ""}</div>`;
   }
 
-  async function drawChart() {
-    let hist;
-    try { hist = await API.get("/api/electricity/history?minutes=60"); } catch { return; }
-    const pts = (hist.points || []).filter((p) => p.data && p.data.watts != null);
-    const meta = document.getElementById("elec-hist-meta");
-    const wrap = document.getElementById("elec-chart");
-    if (!pts.length) {
-      if (wrap) {
-        // replace the chart's sizing wrapper with an honest empty state
-        const holder = wrap.parentElement || wrap;
-        holder.innerHTML = '<div class="empty text-dim">no electricity history yet — samples appear every 5s while a host-level source is available</div>';
-      }
-      if (meta) meta.textContent = "";
-    } else if (wrap) {
-      chart = seriesChart("elec-chart", "W", (p) => p.data.watts, "#f5a623");
-      chart.load(pts, (p) => p.data.watts);
-      if (meta) meta.textContent = `${pts.length} samples · 60 min`;
-    }
-    renderPeriods();
+  async function refreshGpuEnergy() {
+    let g;
+    try { g = await API.get("/api/electricity/gpu-energy"); }
+    catch { return; }
+    const holder = document.getElementById("elec-gpu-card");
+    if (holder) holder.innerHTML = gpuSection(g);
+    await renderGpuPeriods(g);
+    renderGpuDetail(g);
+    drawGpuChart();
   }
 
-  async function renderPeriods() {
-    const box = document.getElementById("elec-periods");
+  async function renderGpuPeriods(g) {
+    const box = document.getElementById("elec-gpu-periods");
     if (!box) return;
-    const periods = [["24h", 1440], ["7d", 10080], ["30d", 43200]];
-    let html = '<div class="grid grid-3">';
+    const periods = [["7d", 10080], ["30d", 43200]];
+    let html = '<div class="grid grid-2">';
     for (const [label, minutes] of periods) {
       let s;
-      try { s = await API.get(`/api/electricity/summary?minutes=${minutes}`); }
-      catch { s = { kwh: null }; }
-      html += periodCard(label, s);
+      try { s = await API.get(`/api/electricity/gpu-energy-window?minutes=${minutes}`); }
+      catch { s = {}; }
+      html += gpuPeriodCard(label, s);
     }
     html += "</div>";
     box.innerHTML = html;
   }
 
-  function periodCard(label, s) {
-    const bounded = s.window_bounded_by_retention
-      ? `<div class="text-faint" style="font-size:11px">window limited by metrics retention (${Math.round((s.retention_seconds || 0) / 3600)} h)</div>` : "";
+  function gpuPeriodCard(label, s) {
     let body;
     if (s.kwh == null) {
       body = `<div class="metric-value mono">—</div>
-        <div class="text-faint" style="font-size:12px">${s.points ? "no complete intervals in window" : "no data in window"}</div>`;
+        <div class="text-faint" style="font-size:12px">${s.points ? "no complete measured intervals in window" : "no data in window"}</div>`;
     } else {
-      const cost = (s.tariff_configured && s.cost != null)
-        ? `<div style="margin-top:6px"><span class="metric-label">Cost</span> <span class="mono">${s.cost.toFixed(2)} ${esc(s.currency || "lei")}</span> <span class="text-faint" style="font-size:11px">(calculated: kWh × tariff)</span></div>`
-        : `<div class="text-faint" style="font-size:12px;margin-top:6px">cost unavailable — tariff not configured</div>`;
       body = `<div class="metric-value mono">${s.kwh.toFixed(4)} kWh</div>
-        <div class="text-faint" style="font-size:12px">calculated · ${s.measured ? "from measured power" : "partially estimated"}</div>${cost}`;
+        <div class="text-faint" style="font-size:12px">${s.average_power_w != null ? "avg " + s.average_power_w.toFixed(1) + " W · " : ""}${Math.round(s.measured_seconds || 0)} s measured</div>
+        ${s.cost != null ? `<div style="margin-top:4px"><span class="mono">${s.cost.toFixed(2)} ${esc(s.currency || "lei")}</span> <span class="text-faint" style="font-size:11px">(calculated: kWh × tariff)</span></div>`
+          : `<div class="text-faint" style="font-size:12px;margin-top:4px">cost unavailable — tariff not configured</div>`}`;
     }
-    return `<div class="metric-tile"><div class="metric-label">Consumption · ${label}</div>${body}${bounded}</div>`;
+    return `<div class="metric-tile"><div class="metric-label">GPU energy · ${label}</div>${body}</div>`;
   }
 
+  function renderGpuDetail(g) {
+    const box = document.getElementById("elec-gpu-detail");
+    if (!box || !g || !g.h24) return;
+    const rows = (g.h24.gpus || []).map((x) =>
+      `<div class="detail-grid"><div class="k">GPU ${x.gpu_index}</div>
+       <div class="v mono">${x.kwh != null ? x.kwh.toFixed(4) + " kWh · " + Math.round(x.measured_seconds) + " s" : "—"}</div></div>`).join("");
+    box.innerHTML = rows ? `<div class="text-faint" style="font-size:12px;margin-bottom:4px">Per-GPU split (24 h):</div>${rows}` : "";
+  }
+
+  let gpuChart = null;
+  async function drawGpuChart() {
+    let hist;
+    try { hist = await API.get("/api/electricity/gpu-history?minutes=60"); } catch { return; }
+    const pts = (hist.points || []).filter((p) => p.data && p.data.average_power_w != null);
+    const wrap = document.getElementById("elec-gpu-chart");
+    if (!wrap) return;
+    if (!pts.length) {
+      const holder = wrap.parentElement || wrap;
+      holder.innerHTML = '<div class="empty text-dim">no aggregated GPU energy points yet — one point appears every 10 s while the sampler runs</div>';
+      return;
+    }
+    gpuChart = seriesChart("elec-gpu-chart", "GPU W (avg)", (p) => p.data.average_power_w, "#f5a623");
+    gpuChart.load(pts, (p) => p.data.average_power_w);
+  }
+
+  // ---- tariff config ----------------------------------------------------------
   async function loadConfig() {
     try { return await API.get("/api/electricity/config"); }
     catch { return { tariff_is_configured: false, notice: "config unavailable (admin only)" }; }
@@ -190,13 +241,29 @@
     try {
       const cfg = await API.put("/api/electricity/config", payload);
       renderConfig(cfg);
-      renderPeriods();
+      refreshGpuEnergy();
       toast("tariff saved", "success");
     } catch (e) { toast("save failed: " + e.message, "error"); }
   }
 
-  function wireActions() { /* current actions wired inline */ }
+  function wireActions() {
+    loadConfig().then(renderConfig);
+  }
+
+  function build(data) {
+    return `
+      ${liveSection(data)}
+      <div id="elec-gpu-card"><div class="card"><div class="card-title">GPU energy</div><div class="empty text-dim">loading…</div></div></div>
+      <div class="card">
+        <div class="card-title">GPU average power — last 60 min</div>
+        <div style="height:200px"><canvas id="elec-gpu-chart"></canvas></div>
+      </div>
+      <div class="card">
+        <div class="card-title">Tariff settings</div>
+        <div id="elec-config"><div class="text-dim">loading…</div></div>
+      </div>`;
+  }
 
   window.Pages = window.Pages || {};
-  window.Pages.electricity = { render, destroy, onSnapshot() {} };
+  window.Pages.electricity = { render, destroy, onSnapshot() {}, tick };
 })();

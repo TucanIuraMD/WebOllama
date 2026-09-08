@@ -50,6 +50,9 @@ def _reset_singletons():
     # ELECTRICITY service holds a Database handle — must not survive a reset
     import webui.electricity as electricity_mod
     electricity_mod._service = None
+    # GPU energy sampler is a singleton with a live asyncio task — kill it
+    import webui.gpu_energy as gpu_energy_mod
+    gpu_energy_mod._sampler = None
 
 
 @pytest.fixture(autouse=True)
