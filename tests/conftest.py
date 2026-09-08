@@ -47,6 +47,9 @@ def _reset_singletons():
     # previous test's payload leaks into the next test's /api/system/processor
     import webui.remote_sys as remote_sys_mod
     remote_sys_mod._processor = None
+    # ELECTRICITY service holds a Database handle — must not survive a reset
+    import webui.electricity as electricity_mod
+    electricity_mod._service = None
 
 
 @pytest.fixture(autouse=True)

@@ -22,6 +22,7 @@ from .routers import (
     auth as auth_router,
     chat as chat_router,
     console as console_router,
+    electricity as electricity_router,
     jobs as jobs_router,
     llm as llm_router,
     logs as logs_router,
@@ -158,6 +159,7 @@ app.include_router(agents_router.router)
 app.include_router(chat_router.router)
 app.include_router(jobs_router.router)
 app.include_router(console_router.router)
+app.include_router(electricity_router.router)
 app.include_router(llm_router.router)
 app.include_router(logs_router.router)
 app.include_router(settings_router.router)

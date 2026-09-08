@@ -90,6 +90,11 @@
           <div class="metric-value" id="dash-running-count">—</div>
           <div class="metric-sub">loaded · open Running →</div>
         </a>
+        <a class="metric-tile dash-link" href="#electricity" id="dash-electricity-tile">
+          <div class="metric-label">Electricity</div>
+          <div class="metric-value" id="dash-electricity-value">—</div>
+          <div class="metric-sub">power & cost · open Electricity →</div>
+        </a>
         <div class="metric-tile" id="dash-cpu-tile">
           <div class="metric-label">CPU</div>
           <div class="metric-value" id="dash-cpu-value">—</div>

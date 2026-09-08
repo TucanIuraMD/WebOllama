@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.4.0 (2026-09-08)
+
+### Features
+
+- **Electricity v1 — server power & cost tracking (local host only)**:
+  new ⚡ Electricity page (linked from the sidebar and as a compact
+  Dashboard card — the Dashboard itself runs no electricity polling)
+  showing measured total server power (W) from host-level sources only —
+  RAPL `energy_uj` (ΔJ/Δt) or hwmon `power*_input` — with GPU `power_draw`
+  (NVML via the existing cached GPUCollector) shown strictly as a
+  labelled reference that is **never** presented as total server power.
+  Energy (kWh) is calculated by trapezoidal integration of the persisted
+  watts series with restart/gap safety (intervals > 600 s excluded — no
+  double-counting); cost = kWh × tariff appears only after an admin
+  explicitly configures the tariff (no invented default — a
+  "needs configuration" notice is shown instead). Samples persist into the
+  existing `metrics` table (kind=`electricity`) on the existing 5 s
+  metrics loop with 60 s source-probe caching — no second telemetry
+  mechanism, no SSH/remote agents, no sudo, no per-request subprocesses.
+  New API under `/api/electricity` (live sample, history, summary with
+  kWh/cost clearly separated as calculated, tariff config GET/PUT,
+  admin-protected). Explicit loading/unavailable/empty/error states
+  everywhere; on hosts without a host-level source the page honestly says
+  "Total server power: data unavailable". See `docs/ELECTRICITY-V1.md`.
+
 ## 1.3.0 (2026-09-07)
 
 ### Fixed
