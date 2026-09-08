@@ -66,10 +66,13 @@ class FakeDb:
         self.settings[key] = value
 
 
-def make_service(gpus=None, rapl=None, hwmon=None, db=None):
+def make_service(gpus=None, rapl=None, hwmon=None, db=None, gpu_energy="unset"):
     db = db or FakeDb()
+    kwargs = {}
+    if gpu_energy != "unset":
+        kwargs["gpu_energy"] = gpu_energy
     svc = ElectricityService(db, gpu_collector=FakeGpuCollector(gpus),
-                             rapl=rapl, hwmon=hwmon)
+                             rapl=rapl, hwmon=hwmon, **kwargs)
     return db, svc
 
 
@@ -469,6 +472,117 @@ async def test_tariff_set_change_and_bounds():
         await svc.set_config(tariff=5000)
     with pytest.raises(ValueError):
         await svc.set_config(currency="too-long-currency")
+
+
+# ---------------------------------------------------------------------------
+# Tariff block (v1.2): display + projections + accumulated costs
+# ---------------------------------------------------------------------------
+@pytest.mark.asyncio
+async def test_tariff_block_set_projections_and_accumulated():
+    db = FakeDb()
+    sampler = GpuEnergySampler(db, reader=lambda: {0: 200.0})
+    set_gpu_energy_sampler(sampler)
+    _, svc = make_service(gpus=[{"index": 0, "name": "V100", "power_draw": 200.0}],
+                          db=db, gpu_energy=sampler)
+    await svc.set_config(tariff=5.0, currency="lei")
+    now = time.time()
+    # self-consistent rows: 100 W over 10 s → 0.277778 Wh (= 100×10/3600)
+    wh = 100.0 * 10.0 / 3600.0
+    db.rows.append((now - 120, "gpu_energy",
+                    {"gpu_index": 0, "interval_seconds": 10.0, "average_power_w": 100.0,
+                     "energy_wh": wh, "source": "NVML"}))
+    # 10 days ago: inside the 30d window, outside today/24h
+    db.rows.append((now - 10 * 86400, "gpu_energy",
+                    {"gpu_index": 0, "interval_seconds": 10.0, "average_power_w": 100.0,
+                     "energy_wh": wh, "source": "NVML"}))
+    out = await svc.gpu_energy_windows()
+    t = out["tariff"]
+    # tariff display
+    assert t["tariff"] == 5.0 and t["tariff_is_configured"] is True
+    assert t["currency"] == "lei"
+    assert t["tariff_notice"] is None
+    # CURRENT COST / hour = current W × tariff / 1000 = 200 × 5 / 1000 = 1.0
+    assert t["current_power_w"] == 200.0
+    assert t["current_cost_per_hour"] == pytest.approx(1.0)
+    # AVERAGE COST / hour from the 24h window average (100 W → 0.5 lei/h)
+    assert t["average_power_w"] == 100.0
+    assert t["average_cost_per_hour"] == pytest.approx(0.5)
+    # ACCUMULATED: measured kWh × tariff, stored rounded to 4 dp
+    kwh_one = wh / 1000.0
+    assert out["today"]["cost"] == round(kwh_one * 5.0, 4)
+    assert out["h24"]["cost"] == round(kwh_one * 5.0, 4)
+    assert out["month"]["cost"] == round(2 * kwh_one * 5.0, 4)
+    for k in ("today", "h24", "month"):
+        assert out[k]["cost_note"] == "calculated: measured energy × tariff"
+        assert out[k]["currency"] == "lei"
+
+
+@pytest.mark.asyncio
+async def test_tariff_block_unset_costs_unavailable_never_zero():
+    set_gpu_energy_sampler(GpuEnergySampler(FakeDb(), reader=lambda: {0: 200.0}))
+    db, svc = make_service(gpus=[{"index": 0, "name": "V100", "power_draw": 200.0}])
+    now = time.time()
+    db.rows.append((now - 60, "gpu_energy",
+                    {"gpu_index": 0, "interval_seconds": 10.0, "average_power_w": 100.0,
+                     "energy_wh": 0.001, "source": "NVML"}))
+    out = await svc.gpu_energy_windows()
+    t = out["tariff"]
+    assert t["tariff"] is None and t["tariff_is_configured"] is False
+    assert "tariff not configured" in t["tariff_notice"]
+    # projections unavailable — and NOT zero
+    assert t["current_cost_per_hour"] is None
+    assert t["average_cost_per_hour"] is None
+    assert t["cost_unavailable"] == "tariff not configured"
+    assert t["current_power_w"] is None  # stable contract: key exists, value None
+    # accumulated costs explicitly None + reason, never 0
+    for k in ("today", "h24", "month"):
+        assert out[k]["cost"] is None
+        assert out[k]["cost_unavailable"] == "tariff not configured"
+        assert out[k].get("cost") != 0
+
+
+@pytest.mark.asyncio
+async def test_current_cost_rounding_four_decimals():
+    set_gpu_energy_sampler(GpuEnergySampler(FakeDb(), reader=lambda: {0: 33.333}))
+    db, svc = make_service(gpus=[{"index": 0, "name": "V100", "power_draw": 33.333}])
+    await svc.set_config(tariff=1.2345)
+    out = await svc.gpu_energy_windows()
+    t = out["tariff"]
+    # 33.333 W × 1.2345 lei/kWh / 1000 = 0.0411499... → 4 dp rounding → 0.0411
+    assert t["current_cost_per_hour"] == pytest.approx(0.0411, abs=1e-4)
+    assert round(t["current_cost_per_hour"], 4) == t["current_cost_per_hour"]
+
+
+@pytest.mark.asyncio
+async def test_period_window_cost_via_apply_tariff():
+    db, svc = make_service(gpus=[])
+    await svc.set_config(tariff=2.0)
+    out = {"kwh": 3.5, "points": 10, "measured_seconds": 600.0}
+    await svc.apply_tariff_to_window(out)
+    assert out["cost"] == pytest.approx(7.0)
+    assert out["currency"] == "lei"
+    # unset → unavailable, never zero
+    out2 = {"kwh": 3.5}
+    await svc.set_config(tariff=0)  # 0 → not configured
+    await svc.apply_tariff_to_window(out2)
+    assert out2["cost"] is None
+    assert out2["cost_unavailable"] == "tariff not configured"
+
+
+@pytest.mark.asyncio
+async def test_gpu_power_never_leaks_into_host_total_via_tariff_block():
+    """The tariff block reads GPU draw for projections but never writes it
+    into the host headline."""
+    gpu = FakeGpuCollector([{"index": 0, "name": "V100", "power_draw": 185.0}])
+    db, svc = make_service(gpus=None, hwmon=StaticHwmon(25.0))
+    svc._gpu = gpu
+    await svc.set_config(tariff=5.0)  # projections (and current_power_w) need a tariff
+    s = await svc.sample()
+    assert s["watts"] == 25.0 and s["gpu_power"]["current_watts"] == 185.0
+    set_gpu_energy_sampler(GpuEnergySampler(FakeDb(), reader=lambda: {0: 185.0}))
+    out = await svc.gpu_energy_windows()
+    assert out["tariff"]["current_power_w"] == 185.0  # GPU-only projection input
+    assert svc.sample and (await svc.sample())["watts"] == 25.0
 
 
 # ---------------------------------------------------------------------------

@@ -113,9 +113,27 @@ const GPU_ENERGY = {
            measured_seconds: 36200, points: 3600, gpus: [{ gpu_index: 0, kwh: 0.3, measured_seconds: 36200 }],
            note: 'GPU-only energy — not total server consumption' },
   sampler: { running: true, last_error: null, sample_interval: 0.5, aggregate_interval: 10.0 },
-  tariff_configured: true,
 };
 GPU_ENERGY.today.cost = 0.0075; GPU_ENERGY.h24.cost = 0.1295; GPU_ENERGY.month.cost = 1.5;
+GPU_ENERGY.today.currency = 'lei'; GPU_ENERGY.h24.currency = 'lei'; GPU_ENERGY.month.currency = 'lei';
+GPU_ENERGY.today.cost_note = 'calculated: measured energy × tariff';
+// v1.2 tariff block: projections + accumulated separation
+GPU_ENERGY.tariff = {
+  tariff: 5.0, currency: 'lei', tariff_is_configured: true, tariff_notice: null,
+  current_power_w: 185.0, current_cost_per_hour: 0.925,
+  average_power_w: 30.1, average_cost_per_hour: 0.1505,
+  cost_unavailable: null,
+};
+const GPU_ENERGY_UNSET = JSON.parse(JSON.stringify(GPU_ENERGY));
+delete GPU_ENERGY_UNSET.today.cost; delete GPU_ENERGY_UNSET.h24.cost; delete GPU_ENERGY_UNSET.month.cost;
+GPU_ENERGY_UNSET.today.cost_unavailable = 'tariff not configured';
+GPU_ENERGY_UNSET.tariff = {
+  tariff: null, currency: 'lei', tariff_is_configured: false,
+  tariff_notice: 'tariff not configured — set lei/kWh to see cost; no default is invented',
+  current_power_w: null, current_cost_per_hour: null,
+  average_power_w: null, average_cost_per_hour: null,
+  cost_unavailable: 'tariff not configured',
+};
 const CFG_SET = { tariff: 5.0, currency: 'lei', tariff_is_configured: true, notice: null };
 const CFG_UNSET = { tariff: null, currency: 'lei', tariff_is_configured: false,
                     notice: 'tariff not configured — set lei/kWh to see cost; no default is invented' };
@@ -183,22 +201,110 @@ async function main() {
     assert(g.includes('Measured time 24h'), 'measured-seconds tile missing');
   });
 
-  await check('tariff unset: cost nowhere, needs-configuration notice', async () => {
-    const noTariff = JSON.parse(JSON.stringify(GPU_ENERGY));
-    noTariff.tariff_configured = false;
-    delete noTariff.today.cost; delete noTariff.h24.cost; delete noTariff.month.cost;
-    noTariff.today.cost_notice = 'tariff not configured';
+  await check('tariff display: TARIFF banner + projections + accumulated separation', async () => {
     await renderWith({
       'GET /api/electricity': HOST_AVAILABLE,
-      'GET /api/electricity/gpu-energy': noTariff,
-      'GET /api/electricity/gpu-energy-window': { kwh: 0.1, points: 3, measured_seconds: 60, average_power_w: 30 },
+      'GET /api/electricity/gpu-energy': GPU_ENERGY,
+      'GET /api/electricity/gpu-energy-window': { kwh: 0.1, points: 3, measured_seconds: 60, average_power_w: 30, cost: 0.5, currency: 'lei' },
+      'GET /api/electricity/gpu-history': { points: [] },
+      'GET /api/electricity/config': CFG_SET,
+    });
+    const g = gpuHtml();
+    // 1) explicit tariff line
+    assert(g.includes('TARIFF:'), 'TARIFF banner missing');
+    assert(g.includes('5.00 lei / kWh'), 'tariff value/units missing');
+    // 3) CURRENT COST / hour = 185 W × 5 / 1000 = 0.925
+    assert(g.includes('CURRENT COST'), 'CURRENT COST tile missing');
+    assert(g.includes('0.925 lei / hour'), 'current cost/hour value missing');
+    assert(g.toLowerCase().includes('projection'), 'projection labeling missing');
+    // 4) AVERAGE COST / hour = 30.1 W × 5 / 1000 = 0.1505 → 0.151
+    assert(g.includes('AVERAGE COST'), 'AVERAGE COST tile missing');
+    assert(g.includes('0.150 lei / hour') || g.includes('0.151 lei / hour'), 'average cost/hour value missing');
+    // 5) accumulated costs
+    assert(g.includes('COST TODAY') && g.includes('0.01 lei'), 'COST TODAY missing');
+    assert(g.includes('COST 24H') && g.includes('0.13 lei'), 'COST 24H missing');
+    assert(g.includes('COST 30D') && g.includes('1.50 lei'), 'COST 30D missing');
+    assert(g.toLowerCase().includes('accumulated'), 'accumulated labeling missing');
+    // 6) the distinction is spelled out
+    assert(g.includes('projections per hour') && g.includes('accumulated'), 'projection vs accumulated explanation missing');
+  });
+
+  await check('tariff unset: TARIFF notice, costs unavailable, never 0 lei', async () => {
+    await renderWith({
+      'GET /api/electricity': HOST_AVAILABLE,
+      'GET /api/electricity/gpu-energy': GPU_ENERGY_UNSET,
+      'GET /api/electricity/gpu-energy-window': { kwh: 0.1, points: 3, measured_seconds: 60, average_power_w: 30, cost: null, cost_unavailable: 'tariff not configured' },
       'GET /api/electricity/gpu-history': { points: [] },
       'GET /api/electricity/config': CFG_UNSET,
     });
     const g = gpuHtml();
-    assert(g.includes('tariff not configured'), 'cost notice missing');
-    assert(!/cost\s+\d/.test(g), 'a cost number appeared without a tariff');
-    assert(cfgHtml().includes('tariff not configured'), 'config notice missing');
+    assert(g.includes('TARIFF:'), 'TARIFF banner missing even when unset');
+    assert(g.includes('tariff not configured'), 'unset notice missing');
+    assert(!/\b0(\.0+)? lei/.test(g), 'a zero cost was rendered without a tariff');
+    assert(g.includes('unavailable — tariff not configured'), 'hourly-cost unavailable wording missing');
+    const p = periodsHtml();
+    assert(p.includes('cost unavailable — tariff not configured'), 'period cost unavailable missing');
+  });
+
+  await check('tariff change: saveConfig PUTs new value, config + costs re-render', async () => {
+    await renderWith({
+      'GET /api/electricity': HOST_AVAILABLE,
+      'GET /api/electricity/gpu-energy': GPU_ENERGY_UNSET,
+      'GET /api/electricity/gpu-energy-window': { kwh: null, points: 0 },
+      'GET /api/electricity/gpu-history': { points: [] },
+      'GET /api/electricity/config': CFG_UNSET,
+    });
+    resetApi();
+    responders['PUT /api/electricity/config'] = (body) => {
+      assert(body.tariff === 4.5, 'PUT payload should carry the new tariff');
+      return { tariff: 4.5, currency: 'lei', tariff_is_configured: true, notice: null };
+    };
+    responders['GET /api/electricity/gpu-energy'] = GPU_ENERGY;
+    responders['GET /api/electricity/gpu-energy-window'] = { kwh: null, points: 0 };
+    els['elec-tariff'] = makeEl('elec-tariff');
+    els['elec-tariff'].value = '4.5';
+    els['elec-config'] = els['elec-config'] || makeEl('elec-config');
+    await page.saveConfig();
+    await new Promise((r) => setImmediate(r));
+    assert(global.__calls.some((c) => c[0] === 'PUT' && c[1] === '/api/electricity/config'), 'config PUT not sent');
+    assert(global.__calls.some((c) => c[1] === '/api/electricity/gpu-energy'), 'costs not refreshed after save');
+    assert(cfgHtml().includes('4.5 lei/kWh'), 'config not re-rendered with the new tariff');
+  });
+
+  await check('cost rounding: 3-dp hourly / 2-dp accumulated rendering', async () => {
+    const rounded = JSON.parse(JSON.stringify(GPU_ENERGY));
+    rounded.tariff.current_cost_per_hour = 0.0410999;  // → 0.041
+    rounded.tariff.average_cost_per_hour = 0.1234567;  // → 0.123
+    rounded.today.cost = 0.005555;                     // → 0.01
+    rounded.month.cost = 123.456789;                   // → 123.46
+    await renderWith({
+      'GET /api/electricity': HOST_AVAILABLE,
+      'GET /api/electricity/gpu-energy': rounded,
+      'GET /api/electricity/gpu-energy-window': { kwh: null, points: 0 },
+      'GET /api/electricity/gpu-history': { points: [] },
+      'GET /api/electricity/config': CFG_SET,
+    });
+    const g = gpuHtml();
+    assert(g.includes('0.041 lei / hour'), 'current cost not rendered at 3 dp');
+    assert(g.includes('0.123 lei / hour'), 'average cost not rendered at 3 dp');
+    assert(g.includes('123.46 lei'), 'accumulated cost not rendered at 2 dp');
+    assert(!g.includes('0.0410999') && !g.includes('123.456789'), 'raw unrounded value leaked to UI');
+  });
+
+  await check('gpu power is never presented as total server power (cost section)', async () => {
+    await renderWith({
+      'GET /api/electricity': HOST_UNAVAILABLE,
+      'GET /api/electricity/gpu-energy': GPU_ENERGY,
+      'GET /api/electricity/gpu-energy-window': { kwh: null, points: 0 },
+      'GET /api/electricity/gpu-history': { points: [] },
+      'GET /api/electricity/config': CFG_SET,
+    });
+    const h = html();
+    assert(h.includes('TOTAL SERVER — data unavailable'), 'host total must stay unavailable');
+    const g = gpuHtml();
+    assert(g.includes('CURRENT COST'), 'GPU cost section present');
+    assert(g.includes('NOT</b> total server') || g.includes('NOT total server'), 'GPU-only disclaimer missing');
+    assert(!/Total server power[^<]*<\/div>\s*<div class="metric-value mono"[^>]*>\s*185/.test(h), 'GPU W leaked into host total');
   });
 
   await check('selected period cards: 7d/30d kWh + calculated cost', async () => {
@@ -211,8 +317,8 @@ async function main() {
     });
     const p = periodsHtml();
     assert(p.includes('5.0000 kWh'), 'period kWh missing');
-    assert(p.includes('25.00 lei'), 'period cost missing');
-    assert(p.toLowerCase().includes('calculated'), 'period cost not labeled calculated');
+    assert(p.includes('COST: 25.00 lei'), 'period cost missing');
+    assert(p.toLowerCase().includes('accumulated'), 'period cost not labeled as accumulated');
   });
 
   await check('gpu history: chart receives aggregated avg-power points; empty state honest', async () => {

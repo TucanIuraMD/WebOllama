@@ -281,7 +281,7 @@ class ElectricityService:
 
     # ---- GPU energy summaries (aggregated rows, GPU-only) ----------------------
     async def gpu_energy_windows(self) -> dict:
-        """GPU energy for today / 24h / 30d + sampler liveness.
+        """GPU energy for today / 24h / 30d + tariff + sampler liveness.
 
         Windows are independent integrations over aggregated gpu_energy rows;
         "today" additionally clips to local midnight, so it can never span
@@ -294,14 +294,11 @@ class ElectricityService:
                                       "points", "gpus", "note")}
 
         midnight = time.time() - (time.time() % 86400)  # UTC day boundary
-        # local-midnight clip for "energy today" (UTC day boundary — the
-        # retention-bounded approximation is stated in the docs)
-        midnight = time.time() - (time.time() % 86400)
         today = _out(await self.gpu_energy.gpu_energy_summary(minutes=1440, since=midnight))
         d24 = _out(await self.gpu_energy.gpu_energy_summary(minutes=1440))
         d30 = _out(await self.gpu_energy.gpu_energy_summary(minutes=43200))
         s = self.gpu_energy
-        return {
+        out = {
             "today": today,
             "h24": d24,
             "month": d30,
@@ -310,6 +307,83 @@ class ElectricityService:
                         "sample_interval": s.sample_interval,
                         "aggregate_interval": s.aggregate_interval},
         }
+        await self._apply_tariff_block(out, current_watts=await self._gpu_current_watts())
+        return out
+
+    # ---- tariff + cost block (v1.2) ---------------------------------------------
+    async def _gpu_current_watts(self) -> Optional[float]:
+        """GPU-only current power from the shared collector (never host total)."""
+        try:
+            g = await self.gpu.sample()
+        except Exception:
+            return None
+        valid = [dev.get("power_draw") for dev in (g or {}).get("gpus") or []
+                 if dev.get("power_draw") is not None]
+        return round(sum(valid), 2) if valid else None
+
+    async def _apply_tariff_block(self, out: dict,
+                                  current_watts: Optional[float]) -> None:
+        """Fill `out` with a tariff/cost block shared by GPU windows.
+
+        Distinction enforced here (and surfaced verbatim in the UI):
+          - current_cost_per_hour / average_cost_per_hour are PROJECTIONS
+            ("if the current/average power is sustained for one hour");
+          - cost_today / cost_24h / cost_30d are ACCUMULATED amounts for
+            already-measured energy (energy × tariff).
+        With no configured tariff nothing becomes 0 — every cost field is
+        None plus an explicit `cost_unavailable` reason.
+        """
+        cfg = await self.get_config()
+        tariff = cfg["tariff"] if cfg.get("tariff_is_configured") else None
+        block = {
+            "tariff": tariff,
+            "currency": cfg.get("currency", "lei"),
+            "tariff_is_configured": cfg.get("tariff_is_configured", False),
+            "tariff_notice": None if cfg.get("tariff_is_configured") else
+                             "tariff not configured — set lei/kWh to see cost; "
+                             "no default is invented",
+            # stable contract: projection keys ALWAYS exist; None = unavailable
+            "current_power_w": None,
+            "current_cost_per_hour": None,
+            "average_power_w": None,
+            "average_cost_per_hour": None,
+            "cost_unavailable": None if cfg.get("tariff_is_configured")
+                                else "tariff not configured",
+        }
+        if tariff is not None:
+            # projections: power [W] × tariff [lei/kWh] / 1000 → lei per hour
+            if current_watts is not None:
+                block["current_power_w"] = current_watts
+                block["current_cost_per_hour"] = round(current_watts * tariff / 1000.0, 4)
+            if isinstance(out.get("h24"), dict) and out["h24"].get("average_power_w") is not None:
+                avg = out["h24"]["average_power_w"]
+                block["average_power_w"] = avg
+                block["average_cost_per_hour"] = round(avg * tariff / 1000.0, 4)
+            # accumulated: measured energy × tariff (energy already in kWh)
+            for key in ("today", "h24", "month"):
+                kwh = out[key].get("kwh") if isinstance(out.get(key), dict) else None
+                if kwh is not None:
+                    out[key]["cost"] = round(kwh * tariff, 4)
+                    out[key]["currency"] = cfg.get("currency", "lei")
+                    out[key]["cost_note"] = "calculated: measured energy × tariff"
+        else:
+            for key in ("today", "h24", "month"):
+                if isinstance(out.get(key), dict):
+                    out[key]["cost"] = None
+                    out[key]["cost_unavailable"] = "tariff not configured"
+        out["tariff"] = block
+
+    async def apply_tariff_to_window(self, out: dict) -> None:
+        """Attach cost to an arbitrary GPU window (selected period card)."""
+        cfg = await self.get_config()
+        if cfg.get("tariff_is_configured"):
+            if out.get("kwh") is not None:
+                out["cost"] = round(out["kwh"] * cfg["tariff"], 4)
+                out["currency"] = cfg.get("currency", "lei")
+                out["cost_note"] = "calculated: measured energy × tariff"
+        else:
+            out["cost"] = None
+            out["cost_unavailable"] = "tariff not configured"
 
     # ---- host energy summary (host-level series, not GPU) ----------------------
     async def energy_summary_host(self, minutes: int = 60) -> dict:

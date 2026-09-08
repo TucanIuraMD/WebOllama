@@ -1,6 +1,6 @@
-# Electricity v1.1 — host power + GPU energy & cost tracking
+# Electricity v1.2 — host power + GPU energy & cost tracking
 
-**Status:** implemented (v1.1) · **Scope:** the LOCAL machine running WebOllama only.
+**Status:** implemented (v1.2) · **Scope:** the LOCAL machine running WebOllama only.
 No SSH, no remote agents, no sudo, no per-request subprocesses. Drive-level
 sensors and drive temperature/telemetry of any kind are out of scope:
 WebOllama monitors only host-level power sources and GPU telemetry.
@@ -26,7 +26,8 @@ compact card from the Dashboard) with two strictly separated blocks:
 | **GPU current power (W)** | MEASURED | NVML `power_draw` (realtime snapshot) |
 | **GPU average power (W)** | CALCULATED | interval-weighted mean of aggregated points |
 | **GPU energy (Wh / kWh)** | **CALCULATED** | `average_power_w × interval_seconds / 3600` over really measured intervals |
-| **Cost** | **CALCULATED** | `energy × tariff` — only with a configured tariff |
+| **CURRENT COST / AVERAGE COST (per hour)** | **CALCULATED — projection** | `power_w × tariff / 1000` — “if this power is sustained for one hour” |
+| **COST TODAY / 24H / 30D / period** | **CALCULATED — accumulated** | `measured energy (kWh) × tariff` — for energy already measured |
 
 Hard rules enforced in code, API and UI:
 
@@ -36,6 +37,30 @@ Hard rules enforced in code, API and UI:
    and a *“tariff not configured”* notice is shown. No default lei/kWh.
 3. **No fabricated readings.** Missing sources → `—` / `unavailable` + reason;
    gaps are never zero-filled, never interpolated.
+
+## 1.1 Tariff and cost (v1.2)
+
+The GPU energy card shows cost in three clearly separated layers:
+
+| Layer | UI label | Formula | Meaning |
+|---|---|---|---|
+| Tariff banner | **TARIFF:** `X.XX lei / kWh` | — | the currently configured tariff (or *tariff not configured*) |
+| Projection | **CURRENT COST** `X.XXX lei / hour` | `current_power_w × tariff / 1000` | forecast if the current GPU power is sustained for 1 h |
+| Projection | **AVERAGE COST** `X.XXX lei / hour` | `average_power_w (24 h) × tariff / 1000` | forecast if the 24 h average GPU power is sustained for 1 h |
+| Accumulated | **COST TODAY / 24H / 30D / selected period** `X.XX lei` | `kwh × tariff` | the actual cost of already-measured GPU energy |
+
+* Projections and accumulated amounts are labeled as such in the UI
+  (*“projection: … sustained 1 h”* vs *“accumulated: measured energy × tariff”*)
+  and in the API (`current_cost_per_hour` / `average_cost_per_hour` vs
+  per-window `cost` with `cost_note`).
+* **No tariff → nothing is zero.** Every cost field is `null` +
+  `cost_unavailable: "tariff not configured"`; the UI shows
+  *“unavailable — tariff not configured”* instead of `0 lei`.
+* The tariff is changed in **Tariff settings** on the same page (admin,
+  `PUT /api/electricity/config`); costs re-render immediately after save.
+* Hourly costs render at 3 decimals, accumulated amounts at 2; the API stores
+  4-decimal values so tests can pin exact rounding.
+* All of this is GPU-only — the host headline (TOTAL SERVER) is unaffected.
 
 ## 2. GPU energy sampling — the 0.5 s / 10 s pipeline
 
@@ -132,8 +157,8 @@ structured payloads instead.
 | Endpoint | Returns |
 |---|---|
 | `GET /api/electricity` | live host sample `{available, measured, source, watts, gpu_power:{current_watts, per_device[], note}, components:{cpu, platform}, reason, ts}` |
-| `GET /api/electricity/gpu-energy` | GPU windows `{today, h24, month, sampler:{running, last_error, sample_interval, aggregate_interval}}`; each window `{available, energy_wh, kwh, average_power_w, measured_seconds, points, gpus[], note, cost?, currency? / cost_notice}` |
-| `GET /api/electricity/gpu-energy-window?minutes=` | one arbitrary GPU window (selected period) + optional cost |
+| `GET /api/electricity/gpu-energy` | GPU windows `{today, h24, month, tariff{...}, sampler:{running, last_error, sample_interval, aggregate_interval}}`; each window `{available, energy_wh, kwh, average_power_w, measured_seconds, points, gpus[], note, cost?+currency?+cost_note? or cost:null+cost_unavailable}`; `tariff` block: `{tariff, currency, tariff_is_configured, tariff_notice, current_power_w, current_cost_per_hour, average_power_w, average_cost_per_hour, cost_unavailable}` (projection/accumulated keys always present; `null` = unavailable) |
+| `GET /api/electricity/gpu-energy-window?minutes=` | one arbitrary GPU window (selected period) + `window_label` + cost / `cost_unavailable` |
 | `GET /api/electricity/gpu-history?minutes=` | aggregated `gpu_energy` points (chart feed) |
 | `GET /api/electricity/summary?minutes=` | host kWh `{kwh, energy_basis, points, integrated_intervals, measured, method, tariff_configured, cost?, currency?}` |
 | `GET /api/electricity/history?minutes=` | raw persisted host watts points (5 s cadence) |
@@ -151,17 +176,23 @@ structured payloads instead.
 
 * Total server power card — measured tiles or the honest
   **TOTAL SERVER — data unavailable** state with the reason.
-* GPU energy card — current W (from the realtime snapshot), average W
-  (24 h), energy today / 24 h / 30 d, measured-seconds and energy-basis
-  tiles, per-GPU split, sampler state pill (running / stopped + error),
-  7 d/30 d period cards, 60 min average-power chart.
-* Tariff editor (admin) with explicit needs-configuration notice.
+* GPU energy card — the **TARIFF** banner (explicit value or
+  *tariff not configured*), current W (from the realtime snapshot), average W
+  (24 h), the **CURRENT COST / AVERAGE COST** projection tiles (lei/hour,
+  footnoted), energy today / 24 h / 30 d, the **COST TODAY / COST 24H /
+  COST 30D** accumulated tiles, measured-seconds and energy-basis tiles,
+  per-GPU split, sampler state pill (running / stopped + error),
+  7 d/30 d **SELECTED PERIOD** cards (with accumulated cost), and the
+  60 min average-power chart.
+* Tariff settings (admin): current tariff/currency shown explicitly,
+  new-value input + Save; after saving, the tariff banner and all costs
+  re-render immediately.
 * One page-scoped 5 s poll (`setInterval`) cleared on re-render/navigation;
   the GPU energy block refreshes every ~30 s via the same timer — no second
   polling mechanism. The Dashboard only links here and runs no electricity
   polling of its own.
 
-## 9. Limitations (v1.1)
+## 9. Limitations (v1.2)
 
 * **GPU-only hosts show no total** — by design. GPU energy is real and shown,
   but the total server line stays unavailable until a host-level source
@@ -171,7 +202,8 @@ structured payloads instead.
   `HISTORY_RETENTION` for month-scale windows.
 * “Energy today” uses a UTC day boundary (retention permitting) — an
   approximation for local-time zones.
-* Cost is a tariff-based estimate, exact only for flat tariffs; GPU cost
+* Cost is a tariff-based estimate, exact only for flat tariffs; hourly cost
+  figures are projections (the power may change within the hour); GPU cost
   covers GPU consumption only — never the whole server.
 * RAPL package energy covers the CPU package (+ present sub-domains), not
   the wall draw; when RAPL and hwmon both exist the headline is their sum —

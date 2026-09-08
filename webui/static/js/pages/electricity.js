@@ -75,28 +75,56 @@
   }
 
   // ---- GPU energy section ---------------------------------------------------
+  function tariffLine(t) {
+    // explicit TARIFF banner — never "0 lei" when unset
+    if (!t || !t.tariff_is_configured || t.tariff == null) {
+      return '<div class="alert warn" style="margin-bottom:10px"><b>TARIFF:</b> tariff not configured — ' +
+        'set lei/kWh in the Tariff settings below to see cost; no default is invented</div>';
+    }
+    return `<div class="alert" style="margin-bottom:10px"><b>TARIFF:</b> ${t.tariff.toFixed(2)} ${esc(t.currency || "lei")} / kWh</div>`;
+  }
+
   function gpuSection(g) {
     const s = g && g.sampler || {};
+    const t = g && g.tariff || {};
     const today = g && g.today || {};
     const h24 = g && g.h24 || {};
     const month = g && g.month || {};
     const state = s.running
       ? '<span class="right status-pill status-on">sampler running</span>'
       : '<span class="right status-pill status-off">sampler stopped' + (s.last_error ? " — " + esc(s.last_error) : "") + '</span>';
+    const curCost = t.current_cost_per_hour != null
+      ? t.current_cost_per_hour.toFixed(3) + " " + esc(t.currency || "lei") + " / hour"
+      : "unavailable — tariff not configured";
+    const avgCost = t.average_cost_per_hour != null
+      ? t.average_cost_per_hour.toFixed(3) + " " + esc(t.currency || "lei") + " / hour"
+      : "unavailable — tariff not configured";
     return `<div class="card">
       <div class="card-title">GPU energy ${state}</div>
+      ${tariffLine(t)}
       <div class="grid grid-4">
         ${tile("GPU current power", gpuCurrentW())}
         ${tile("GPU average power", h24.average_power_w != null ? h24.average_power_w.toFixed(1) + " W" : "—", "24 h avg")}
+        ${tile("CURRENT COST", curCost, "projection: current W sustained 1 h")}
+        ${tile("AVERAGE COST", avgCost, "projection: 24h-avg W sustained 1 h")}
+      </div>
+      <div class="grid grid-4" style="margin-top:10px">
         ${tile("GPU energy today", fmtKwh(today), costLine(today))}
         ${tile("GPU energy 24h", fmtKwh(h24), costLine(h24))}
-      </div>
-      <div class="grid grid-3" style="margin-top:10px">
         ${tile("GPU energy 30d", fmtKwh(month), costLine(month))}
         ${tile("Measured time 24h", h24.measured_seconds != null ? Math.round(h24.measured_seconds) + " s" : "—", "gaps excluded")}
+      </div>
+      <div class="grid grid-2" style="margin-top:10px">
+        ${tile("COST TODAY", accCost(today, t), "accumulated: measured energy × tariff")}
+        ${tile("COST 24H", accCost(h24, t), "accumulated: measured energy × tariff")}
+      </div>
+      <div class="grid grid-2" style="margin-top:10px">
+        ${tile("COST 30D", accCost(month, t), "accumulated: measured energy × tariff")}
         ${tile("Energy basis", "calculated", "avg W × measured interval / 3600")}
       </div>
       <div class="text-faint" style="font-size:12px;margin-top:10px">
+        CURRENT / AVERAGE COST are <b>projections per hour</b> (if that power is sustained);
+        COST TODAY / 24H / 30D are <b>accumulated</b> amounts for already-measured GPU energy.
         GPU-only telemetry (NVML, 0.5 s RAM-buffered samples → one aggregated DB point per 10 s).
         <b>GPU energy is NOT total server energy.</b>
         ${s.last_error && s.running ? " Last sampler error: " + esc(s.last_error) : ""}
@@ -128,8 +156,16 @@
   function costLine(win) {
     if (!win) return "";
     if (win.cost != null) return "cost " + win.cost.toFixed(2) + " " + esc(win.currency || "lei") + " (calculated)";
-    if (win.cost_notice) return "cost unavailable — tariff not configured";
+    if (win.cost_notice || win.cost_unavailable) return "cost unavailable — tariff not configured";
     return "";
+  }
+
+  function accCost(win, t) {
+    // accumulated cost for already-measured energy — never "0 lei" when unset
+    if (win && win.cost != null) {
+      return `<span class="mono" style="font-size:18px">${win.cost.toFixed(2)} ${esc(win.currency || (t && t.currency) || "lei")}</span>`;
+    }
+    return '<span class="mono" style="font-size:18px">—</span><div class="text-faint" style="font-size:12px">unavailable — tariff not configured</div>';
   }
 
   function tile(label, value, sub) {
@@ -165,6 +201,7 @@
   }
 
   function gpuPeriodCard(label, s) {
+    const wl = s.window_label ? ` (${esc(s.window_label)})` : "";
     let body;
     if (s.kwh == null) {
       body = `<div class="metric-value mono">—</div>
@@ -172,10 +209,10 @@
     } else {
       body = `<div class="metric-value mono">${s.kwh.toFixed(4)} kWh</div>
         <div class="text-faint" style="font-size:12px">${s.average_power_w != null ? "avg " + s.average_power_w.toFixed(1) + " W · " : ""}${Math.round(s.measured_seconds || 0)} s measured</div>
-        ${s.cost != null ? `<div style="margin-top:4px"><span class="mono">${s.cost.toFixed(2)} ${esc(s.currency || "lei")}</span> <span class="text-faint" style="font-size:11px">(calculated: kWh × tariff)</span></div>`
+        ${s.cost != null ? `<div style="margin-top:4px"><span class="mono" style="font-size:14px">COST: ${s.cost.toFixed(2)} ${esc(s.currency || "lei")}</span> <span class="text-faint" style="font-size:11px">(accumulated: measured energy × tariff)</span></div>`
           : `<div class="text-faint" style="font-size:12px;margin-top:4px">cost unavailable — tariff not configured</div>`}`;
     }
-    return `<div class="metric-tile"><div class="metric-label">GPU energy · ${label}</div>${body}</div>`;
+    return `<div class="metric-tile"><div class="metric-label">SELECTED PERIOD${wl} · GPU energy</div>${body}</div>`;
   }
 
   function renderGpuDetail(g) {
@@ -265,5 +302,5 @@
   }
 
   window.Pages = window.Pages || {};
-  window.Pages.electricity = { render, destroy, onSnapshot() {}, tick };
+  window.Pages.electricity = { render, destroy, onSnapshot() {}, tick, saveConfig, renderConfig };
 })();

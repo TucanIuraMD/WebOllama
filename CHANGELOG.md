@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.4.2 (2026-09-08)
+
+### Changed
+
+- **Electricity v1.2 — tariff & cost clarity in the UI**: the GPU energy card
+  now shows an explicit **TARIFF: X.XX lei / kWh** banner (or a
+  "tariff not configured" notice — never an invented `0 lei`), two clearly
+  labeled **projection** tiles — **CURRENT COST** (`current_power_w × tariff
+  / 1000`, "if sustained 1 h") and **AVERAGE COST** (24 h `average_power_w ×
+  tariff / 1000`) in lei/hour — and **accumulated** **COST TODAY / COST 24H /
+  COST 30D** tiles (`measured kWh × tariff`, footnoted "accumulated:
+  measured energy × tariff"), plus accumulated cost on the selected-period
+  cards. Costs are computed in the API (`GET /api/electricity/gpu-energy`
+  now carries a stable `tariff` block; projection keys always present,
+  `null` = unavailable) and re-render immediately after the tariff is saved
+  in Tariff settings. Hourly costs render at 3 decimals, accumulated at 2
+  (API stores 4-decimal values). The 0.5 s NVML → RAM → 10 s aggregated
+  pipeline, the GPU-only honesty notes and the compact Dashboard link are
+  unchanged; no NVMe anywhere. Tests: tariff display, current/average cost
+  per hour, accumulated cost, tariff-unset (no zeros), tariff change flow,
+  rounding, GPU ≠ total — backend + frontend (34 electricity tests total).
+  Docs: `docs/ELECTRICITY-V1.md` rewritten for v1.2.
+
 ## 1.4.1 (2026-09-08)
 
 ### Changed

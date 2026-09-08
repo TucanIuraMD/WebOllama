@@ -37,26 +37,13 @@ async def electricity(user: dict = Depends(current_user)):
 
 @router.get("/gpu-energy")
 async def gpu_energy(user: dict = Depends(current_user)):
-    """Aggregated GPU energy: today / 24h / 30d windows + sampler state.
+    """Aggregated GPU energy: today / 24h / 30d + tariff + sampler state.
 
-    Energy is calculated from measured GPU power over really measured
-    intervals (gaps contribute nothing). GPU-only — never total server.
+    The tariff block separates PROJECTIONS (current_cost_per_hour,
+    average_cost_per_hour) from ACCUMULATED amounts (cost today/24h/30d =
+    measured energy × tariff). GPU-only — never total server.
     """
-    svc = get_electricity_service()
-    out = await svc.gpu_energy_windows()
-    cfg = await svc.get_config()
-    out["tariff_configured"] = bool(cfg.get("tariff_is_configured"))
-    if cfg.get("tariff_is_configured"):
-        tariff = cfg["tariff"]
-        for key in ("today", "h24", "month"):
-            kwh = out[key].get("kwh")
-            if kwh is not None:
-                out[key]["cost"] = round(kwh * tariff, 4)
-                out[key]["currency"] = cfg["currency"]
-    else:
-        for key in ("today", "h24", "month"):
-            out[key]["cost_notice"] = "tariff not configured"
-    return out
+    return await get_electricity_service().gpu_energy_windows()
 
 
 @router.get("/gpu-energy-window")
@@ -67,15 +54,21 @@ async def gpu_energy_window(
     """Aggregated GPU energy for an arbitrary window (selected period)."""
     svc = get_electricity_service()
     s = await svc.gpu_energy.gpu_energy_summary(minutes=minutes)
-    cfg = await svc.get_config()
     out = dict(s)
     out["minutes"] = minutes
-    if cfg.get("tariff_is_configured") and out.get("kwh") is not None:
-        out["cost"] = round(out["kwh"] * cfg["tariff"], 4)
-        out["currency"] = cfg["currency"]
-    else:
-        out["cost_notice"] = "tariff not configured"
+    out["window_label"] = _period_label(minutes)
+    await svc.apply_tariff_to_window(out)
     return out
+
+
+def _period_label(minutes: int) -> str:
+    if minutes % 43200 == 0:
+        return f"{minutes // 43200} mo"
+    if minutes % 1440 == 0:
+        return f"{minutes // 1440} d"
+    if minutes % 60 == 0:
+        return f"{minutes // 60} h"
+    return f"{minutes} m"
 
 
 @router.get("/gpu-history")
