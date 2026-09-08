@@ -446,10 +446,16 @@ def test_no_nvme_anywhere_in_frontend_or_docs():
 
 
 def test_dashboard_links_to_electricity_not_charts():
-    """Dashboard gets a compact LINK to Electricity, never electric charts."""
+    """Dashboard gets a compact LINK to Electricity plus a summary tile fed
+    by ONE shared-endpoint fetch per render (v1.3) — never electric charts,
+    no polling timer, no own sampler."""
     dash = (Path(__file__).resolve().parent.parent / "webui" / "static" / "js" / "pages" / "dashboard.js").read_text()
     assert 'href="#electricity"' in dash
-    assert "/api/electricity" not in dash  # no polling of electricity from dashboard
+    # the only allowed electricity API use: the v1.3 summary tile's one-shot
+    # fetch of the shared gpu-energy payload (no other endpoint, no polling)
+    code_refs = [ln.strip() for ln in dash.splitlines()
+                 if "/api/electricity" in ln and not ln.strip().startswith(("*", "/*", "//"))]
+    assert len(code_refs) == 1 and '"/api/electricity/gpu-energy"' in code_refs[0], code_refs
     idx = (Path(__file__).resolve().parent.parent / "webui" / "static" / "index.html").read_text()
     assert 'data-page="electricity"' in idx
     assert 'electricity.js' in idx

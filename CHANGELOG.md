@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.4.3 (2026-09-08)
+
+### Changed
+
+- **Dashboard Electricity summary tile (v1.3)**: the Dashboard ELECTRICITY
+  tile now shows a compact summary from the EXISTING
+  `/api/electricity/gpu-energy` endpoint — with a configured tariff:
+  energy today (X.XXXX kWh) · cost today (X.XX lei) · current cost
+  (X.XXX lei / hour); tariff unset: kWh + "tariff not configured" (never a
+  zero cost); no GPU energy telemetry: "data unavailable"; API error:
+  explicit "unavailable" (never rendered as no data). The tile is fetched
+  once per Dashboard render and softly refreshed riding the EXISTING
+  websocket cadence with a 60 s throttle — no Dashboard-owned sampler, no
+  new endpoint, no new polling timer; the 0.5 s NVML → RAM → 10 s
+  aggregated pipeline is untouched and GPU numbers are never presented as
+  total server energy. Tests: dashboard flows extended with electricity
+  tile states (data/tariff/unset/no-telemetry/error/no-duplicate-polling);
+  also fixed a pre-existing harness flaw where the race-condition check
+  deadlocked on a per-call /api/status mock, silently skipping all later
+  checks (now a shared promise — the whole 22-check suite actually runs).
+  Docs: `docs/ELECTRICITY-V1.md` §8.1 (Dashboard tile contract).
+
 ## 1.4.2 (2026-09-08)
 
 ### Changed

@@ -1,6 +1,6 @@
-# Electricity v1.2 — host power + GPU energy & cost tracking
+# Electricity v1.3 — host power + GPU energy & cost tracking
 
-**Status:** implemented (v1.2) · **Scope:** the LOCAL machine running WebOllama only.
+**Status:** implemented (v1.3) · **Scope:** the LOCAL machine running WebOllama only.
 No SSH, no remote agents, no sudo, no per-request subprocesses. Drive-level
 sensors and drive temperature/telemetry of any kind are out of scope:
 WebOllama monitors only host-level power sources and GPU telemetry.
@@ -192,7 +192,28 @@ structured payloads instead.
   polling mechanism. The Dashboard only links here and runs no electricity
   polling of its own.
 
-## 9. Limitations (v1.2)
+## 8.1 Dashboard Electricity summary tile (v1.3)
+
+The Dashboard ELECTRICITY tile shows a compact summary built from the
+**existing** `GET /api/electricity/gpu-energy` payload — no new endpoint,
+no Dashboard-owned sampler, no new polling timer (the algorithm
+0.5 s NVML → RAM buffer → 10 s aggregation → DB is untouched):
+
+| State | Tile |
+|---|---|
+| data + tariff | **Energy today** `X.XXXX kWh · X.XX lei`, **Current cost** `X.XXX lei / hour` · *open Electricity →* |
+| energy measured, tariff unset | `X.XXXX kWh` + **tariff not configured** · *open Electricity →* (never a zero cost) |
+| no GPU energy telemetry | **data unavailable** + *no GPU energy telemetry yet* · *open Electricity →* |
+| electricity API error | **unavailable** + *electricity API error* · *open Electricity →* (an error is never rendered as "no data") |
+
+* Fetched once per Dashboard render; a soft refresh rides the **existing
+  websocket cadence** with a 60 s throttle — strictly less chatty than the
+  Electricity page's own 5 s poll. No `setInterval` is created for it.
+* GPU figures stay GPU-only — the tile never presents GPU energy/cost as
+  total server energy (the TOTAL SERVER headline remains on the Electricity
+  page and is unaffected).
+
+## 9. Limitations (v1.3)
 
 * **GPU-only hosts show no total** — by design. GPU energy is real and shown,
   but the total server line stays unavailable until a host-level source

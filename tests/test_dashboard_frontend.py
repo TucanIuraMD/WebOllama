@@ -5,7 +5,11 @@ stub and drives the actual page flows required by the Dashboard v2 task:
 initial loading, ollama offline, no models, running models (with split),
 GPU unavailable/available, stale PROCESSOR handling, navigation links,
 single-source GPU rendering, WS live updates, no duplicate polling and
-no leaked timers across renders. Skipped when node is absent.
+no leaked timers across renders. Also the ELECTRICITY summary tile
+(v1.3): energy today + cost today + current cost/hour from the EXISTING
+/electricity/gpu-energy endpoint (no own sampler, no new polling timer),
+tariff-not-configured, no-telemetry, API-error states, and the 60 s
+WS-cadence throttle. Skipped when node is absent.
 """
 import json
 import shutil
@@ -66,12 +70,16 @@ global.API = {
   get: async (url) => { calls.push(['GET', url]); const r = responders['GET ' + url.split('?')[0]]; if (!r) throw new Error('no mock for GET ' + url); return typeof r === 'function' ? r() : r; },
   post: async () => ({}), put: async () => ({}), del: async () => ({}),
 };
-function resetApi() { responders = {}; calls = []; }
+function resetApi() { responders = {}; calls.length = 0; }  // keep identity: global.__calls aliases this array
 global.__calls = calls;
 
 // fake timers
 let now = 0;
 let timers = [];
+let fakeNow = null; // when set, Date.now() is faked (electricity-throttle tests)
+const realDateNow = Date.now.bind(global.Date);
+global.Date = Object.create(Date);
+global.Date.now = () => (fakeNow !== null ? fakeNow : realDateNow());
 global.setInterval = (fn, ms) => { const t = { fn, ms, cleared: false }; timers.push(t); return t; };
 global.clearInterval = (t) => { if (t) t.cleared = true; };
 
@@ -114,10 +122,12 @@ async function main() {
     Object.assign(responders, mocks);
     timers = [];
     els['page-container'] = container;
+    fakeNow = (fakeNow === null ? realDateNow() : fakeNow) + 120000; // advance past the 60 s electricity throttle
     await page.render(container);
   }
   responders['GET /api/history/gpu'] = () => ({ points: [] });
   responders['GET /api/history/system'] = () => ({ points: [] });
+  const flush = () => new Promise((r) => setImmediate(r)); // let in-flight fetches settle
 
   await check('initial loading states visible while /api/status in flight', async () => {
     let resolveStatus;
@@ -301,21 +311,55 @@ async function main() {
     App.state.snapshot = null;
   });
 
+  // ---- ELECTRICITY tile (v1.3 summary) ----
+  const ELEC_OK = {
+    today: { available: true, energy_wh: 4.1, kwh: 0.0041, average_power_w: 30.5, measured_seconds: 173, points: 17,
+             cost: 0.0205, currency: 'lei', cost_note: 'calculated: measured energy × tariff' },
+    h24: { available: true, kwh: 0.0259, average_power_w: 30.1, measured_seconds: 3100, points: 310, cost: 0.1295, currency: 'lei' },
+    month: { available: true, kwh: 0.3, average_power_w: 29.8, measured_seconds: 36200, points: 3600, cost: 1.5, currency: 'lei' },
+    sampler: { running: true, last_error: null, sample_interval: 0.5, aggregate_interval: 10.0 },
+    tariff: { tariff: 5.0, currency: 'lei', tariff_is_configured: true, tariff_notice: null,
+              current_power_w: 185.0, current_cost_per_hour: 0.925,
+              average_power_w: 30.1, average_cost_per_hour: 0.1505, cost_unavailable: null },
+  };
+  const ELEC_UNSET = JSON.parse(JSON.stringify(ELEC_OK));
+  ELEC_UNSET.today.cost = null; ELEC_UNSET.today.cost_unavailable = 'tariff not configured';
+  ELEC_UNSET.tariff = { tariff: null, currency: 'lei', tariff_is_configured: false,
+    tariff_notice: 'tariff not configured — set lei/kWh to see cost; no default is invented',
+    current_power_w: null, current_cost_per_hour: null, average_power_w: null,
+    average_cost_per_hour: null, cost_unavailable: 'tariff not configured' };
+  const ELEC_NO_ENERGY = {
+    today: { available: false, energy_wh: null, kwh: null, average_power_w: null, measured_seconds: 0,
+             points: 0, gpus: [], note: 'GPU energy unavailable — NVML missing or sampler stopped' },
+    h24: { available: false, kwh: null }, month: { available: false, kwh: null },
+    sampler: { running: false, last_error: 'NVML not available', sample_interval: 0.5, aggregate_interval: 10.0 },
+    tariff: { tariff: null, tariff_is_configured: false, current_cost_per_hour: null,
+              average_cost_per_hour: null, cost_unavailable: 'tariff not configured' },
+  };
+
   await check('race condition: two overlapping renders — only the latest wins', async () => {
     App.state.snapshot = null;
     let resolveA;
-    responders['GET /api/status'] = () => new Promise((res) => { resolveA = res; });
+    // ONE shared promise: both overlapping renders await the same fetch,
+    // so resolving it must settle BOTH continuations (the old per-call
+    // promise left the first render pending forever and silently killed
+    // the rest of the harness).
+    const sharedStatus = new Promise((res) => { resolveA = res; });
+    responders['GET /api/status'] = () => sharedStatus;
     responders['GET /api/system/processor'] = () => ({ available: false });
     responders['GET /api/history/gpu'] = () => ({ points: [] });
     responders['GET /api/history/system'] = () => ({ points: [] });
+    responders['GET /api/electricity/gpu-energy'] = ELEC_OK;
     const pA = page.render(container);           // render A: slow /api/status
-    const pB = page.render(container);           // render B: snapshot cached → completes fast
-    await pB;
-    // now resolve A's stale fetch — it must be ignored (procSeq guard)
+    const pB = page.render(container);           // render B: also awaits /api/status
+    // resolve the shared /api/status BEFORE awaiting: B (latest seq) must win,
+    // A's continuation must see a newer seq and bail out without re-rendering.
     resolveA(snap());
+    await pB;
     await pA;
-    // B's shell is still what's displayed: A's stale resolve must not re-render
+    // B's shell is what's displayed: A's stale resolve must not re-render
     assert(container._html.length > 0, 'container blank');
+    assert(container._html.includes('dash-electricity-tile'), 'B shell missing');
   });
 
   await check('responsive/responsive-safe markup: grid classes + links are plain anchors', async () => {
@@ -323,6 +367,104 @@ async function main() {
     await renderWith({ 'GET /api/status': () => s, 'GET /api/system/processor': () => ({ available: false }) });
     assert(container._html.includes('grid grid-4') && container._html.includes('grid grid-2'), 'grid classes missing (responsive via CSS auto-fit)');
     assert(!container._html.includes('onclick="location.reload'), 'no full-page reload hooks');
+  });
+
+  await check('ELECTRICITY tile: data + tariff → kWh, cost today, current cost/hour', async () => {
+    await renderWith({
+      'GET /api/status': () => snap(),
+      'GET /api/system/processor': () => ({ available: false }),
+      'GET /api/electricity/gpu-energy': ELEC_OK,
+    });
+    await flush(); // the tile fills from the in-flight electricity fetch
+    const v = document.getElementById('dash-electricity-value').textContent;
+    const sub = document.getElementById('dash-electricity-sub').textContent;
+    assert(v.includes('0.0041 kWh'), 'energy today missing: ' + v);
+    assert(v.includes('0.02 lei'), 'cost today missing: ' + v);
+    assert(sub.includes('current cost 0.925 lei / hour'), 'current cost/hour missing: ' + sub);
+    assert(sub.includes('open Electricity'), 'link hint missing');
+    assert(!sub.toLowerCase().includes('total server'), 'tile must not imply total-server energy');
+    // one fetch per render — exactly one call to the shared endpoint
+    const elecCalls = calls.filter((c) => c[1] === '/api/electricity/gpu-energy').length;
+    assert(elecCalls === 1, 'expected 1 electricity fetch per render, got ' + elecCalls);
+  });
+
+  await check('ELECTRICITY tile: tariff not configured → kWh + notice, no zero cost', async () => {
+    await renderWith({
+      'GET /api/status': () => snap(),
+      'GET /api/system/processor': () => ({ available: false }),
+      'GET /api/electricity/gpu-energy': ELEC_UNSET,
+    });
+    await flush();
+    const v = document.getElementById('dash-electricity-value').textContent;
+    const sub = document.getElementById('dash-electricity-sub').textContent;
+    assert(v.includes('0.0041 kWh'), 'energy today should still show');
+    assert(!/\d+\.\d+ lei/.test(v), 'a cost was rendered without a tariff: ' + v);
+    assert(sub.includes('tariff not configured'), 'unset notice missing: ' + sub);
+    assert(sub.includes('open Electricity'), 'link hint missing');
+  });
+
+  await check('ELECTRICITY tile: no GPU energy telemetry → data unavailable', async () => {
+    await renderWith({
+      'GET /api/status': () => snap(),
+      'GET /api/system/processor': () => ({ available: false }),
+      'GET /api/electricity/gpu-energy': ELEC_NO_ENERGY,
+    });
+    await flush();
+    const v = document.getElementById('dash-electricity-value').textContent;
+    const sub = document.getElementById('dash-electricity-sub').textContent;
+    assert(v.includes('data unavailable'), 'unavailable state missing: ' + v);
+    assert(!v.includes('0'), 'no numeric energy may render from no-telemetry payload');
+    assert(sub.includes('no GPU energy telemetry yet'), 'telemetry reason missing: ' + sub);
+    assert(sub.includes('open Electricity'), 'link hint missing');
+  });
+
+  await check('ELECTRICITY tile: API error → explicit unavailable, NOT "no data"', async () => {
+    await renderWith({
+      'GET /api/status': () => snap(),
+      'GET /api/system/processor': () => ({ available: false }),
+      'GET /api/electricity/gpu-energy': () => { throw new Error('HTTP 500: db locked'); },
+    });
+    await flush();
+    const v = document.getElementById('dash-electricity-value').textContent;
+    const sub = document.getElementById('dash-electricity-sub').textContent;
+    assert(v.includes('unavailable'), 'error must render as unavailable: ' + v);
+    assert(sub.includes('electricity API error'), 'error labeling missing: ' + sub);
+    assert(sub.includes('open Electricity'), 'link hint missing');
+    assert(!sub.includes('data unavailable') || !v.includes('data unavailable'), 'error must be distinguishable from no-telemetry');
+  });
+
+  await check('ELECTRICITY tile: no duplicate polling — no new interval, WS refresh throttled', async () => {
+    await renderWith({
+      'GET /api/status': () => snap(),
+      'GET /api/system/processor': () => ({ available: false }),
+      'GET /api/electricity/gpu-energy': ELEC_OK,
+    });
+    const active = timers.filter((t) => !t.cleared);
+    assert(active.length === 1, 'electricity must not add an interval: ' + active.length);
+    assert(active[0].ms === 3000, 'the only interval must remain the PROCESSOR poll');
+    resetApi();
+    responders['GET /api/electricity/gpu-energy'] = ELEC_OK;
+    // WS snapshots at full cadence: throttle must collapse them to ~1 fetch/min
+    for (let i = 0; i < 10; i++) page.onSnapshot(snap());
+    const elecCalls = calls.filter((c) => c[1] === '/api/electricity/gpu-energy').length;
+    assert(elecCalls <= 1, 'WS-cadence refresh not throttled: ' + elecCalls + ' calls for 10 snapshots');
+  });
+
+  await check('ELECTRICITY tile: WS live update refreshes values after throttle window', async () => {
+    await renderWith({
+      'GET /api/status': () => snap(),
+      'GET /api/system/processor': () => ({ available: false }),
+      'GET /api/electricity/gpu-energy': ELEC_OK,
+    });
+    resetApi();
+    const e2 = JSON.parse(JSON.stringify(ELEC_OK));
+    e2.today.kwh = 0.0123; e2.today.cost = 0.0615;
+    responders['GET /api/electricity/gpu-energy'] = e2;
+    // bypass the throttle seam (module time not directly manipulable)
+    await page.loadElectricitySummary(true);
+    const v = els['dash-electricity-value'].textContent;
+    assert(v.includes('0.0123 kWh'), 'tile not refreshed: ' + v);
+    assert(v.includes('0.06 lei'), 'refreshed cost missing: ' + v);
   });
 
   process.exit(failures ? 1 : 0);

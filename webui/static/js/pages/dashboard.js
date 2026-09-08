@@ -58,6 +58,7 @@
     if (snap) startCharts();
     loadHistory(60);
     startProcessorPolling();
+    loadElectricitySummary(); // ONE existing-API fetch per render; NO new timer
   }
 
   function buildPage(snap, loadError) {
@@ -92,8 +93,8 @@
         </a>
         <a class="metric-tile dash-link" href="#electricity" id="dash-electricity-tile">
           <div class="metric-label">Electricity</div>
-          <div class="metric-value" id="dash-electricity-value">—</div>
-          <div class="metric-sub">power & cost · open Electricity →</div>
+          <div class="metric-value" style="font-size:14px" id="dash-electricity-value">—</div>
+          <div class="metric-sub" id="dash-electricity-sub">power & cost · open Electricity →</div>
         </a>
         <div class="metric-tile" id="dash-cpu-tile">
           <div class="metric-label">CPU</div>
@@ -263,6 +264,62 @@
           <span class="badge loaded">loaded</span>
         </div>`;
     }).join("");
+  }
+
+  /* ---- ELECTRICITY tile (compact summary) ----
+   * Reads the EXISTING /api/electricity/gpu-energy payload (same endpoint
+   * the Electricity page uses) — no new endpoint, no own sampler, no new
+   * polling timer. Fetched once per render; a soft refresh piggybacks on
+   * the existing websocket cadence with a 60 s throttle (stale-less, and
+   * strictly LESS chatty than the page's own 5 s poll). GPU energy is
+   * GPU-only and is never presented as total server energy. */
+  let elecSummaryFetchedAt = 0;
+
+  function elecTileHtml(e) {
+    const open = 'open Electricity →';
+    if (e && e.error) {
+      return { value: 'unavailable', sub: `electricity API error · ${open}` };
+    }
+    const t = (e && e.tariff) || {};
+    const today = (e && e.today) || {};
+    const hasEnergy = today.available && today.kwh != null;
+    if (!hasEnergy) {
+      // sampler stopped / NVML absent / no aggregated points — honest empty
+      return { value: 'data unavailable', sub: `no GPU energy telemetry yet · ${open}` };
+    }
+    if (!t.tariff_is_configured || t.tariff == null) {
+      return { value: `${today.kwh.toFixed(4)} kWh`, sub: `tariff not configured · ${open}` };
+    }
+    const curCost = t.current_cost_per_hour;
+    return {
+      value: `${today.kwh.toFixed(4)} kWh · ${today.cost != null ? today.cost.toFixed(2) : "—"} ${esc(t.currency || "lei")}`,
+      sub: `current cost ${curCost != null ? curCost.toFixed(3) + " " + esc(t.currency || "lei") + " / hour" : "unavailable"} · ${open}`,
+    };
+  }
+
+  function renderElecTile(e) {
+    const v = document.getElementById("dash-electricity-value");
+    const s = document.getElementById("dash-electricity-sub");
+    if (!v) return;
+    const parts = elecTileHtml(e);
+    v.textContent = parts.value;
+    if (s) s.textContent = parts.sub;
+  }
+
+  async function loadElectricitySummary(force = false) {
+    if (App.state.currentPage !== "dashboard") return;
+    // WS-cadence soft refresh with a throttle — never its own timer
+    const nowMs = Date.now();
+    if (!force && nowMs - elecSummaryFetchedAt < 60000) return;
+    elecSummaryFetchedAt = nowMs;
+    let data;
+    try {
+      data = await API.get("/api/electricity/gpu-energy");
+    } catch (err) {
+      renderElecTile({ error: String((err && err.message) || err) });
+      return;
+    }
+    renderElecTile(data);
   }
 
   /* Exposed for the stale-state test seam (module-internal time is not
@@ -446,6 +503,8 @@
   function onSnapshot(snap) {
     if (App.state.currentPage !== "dashboard") return;
     drawSnapshot(snap, "");
+    // electricity tile: throttled soft refresh riding the existing WS cadence
+    loadElectricitySummary();
     // live GPU bars + tiles (same shared snapshot as the GPU block above)
     const gpu = snap.gpu || {};
     const g = (gpu.gpus || [])[0];
@@ -487,5 +546,5 @@
   }
 
   window.Pages = window.Pages || {};
-  window.Pages.dashboard = { render, onSnapshot, drawSnapshot, drawGpu, drawRunning, renderProcessor, startProcessorPolling, stopProcessorPolling, markProcStaleIfDue, touchProcOk, refreshProcessor };
+  window.Pages.dashboard = { render, onSnapshot, drawSnapshot, drawGpu, drawRunning, renderProcessor, startProcessorPolling, stopProcessorPolling, markProcStaleIfDue, touchProcOk, refreshProcessor, loadElectricitySummary, renderElecTile };
 })();
