@@ -27,6 +27,9 @@ function makeNode() {
               appendChild(c) { c._parent = o; o._children.push(c); },
               remove() { const p = o._parent; if (p) { const i = p._children.indexOf(o); if (i >= 0) p._children.splice(i, 1); o._parent = null; } },
               focus() { o._focused = true; },
+              addEventListener() {}, removeEventListener() {},   // composer key handlers
+              setSelectionRange() {},                            // code "Reply" caret
+              insertBefore(c) { c._parent = o; o._children.push(c); return c; },
               _children: [],
               scrollTop: 0, scrollHeight: 100,
               classList: { add() {}, remove() {}, toggle() {} } };

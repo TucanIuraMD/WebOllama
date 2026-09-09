@@ -32,6 +32,8 @@ function makeNode() {
               appendChild(c) { c._parent = o; o._children.push(c); },
               remove() { const p = o._parent; if (p) { const i = p._children.indexOf(o); if (i >= 0) p._children.splice(i, 1); o._parent = null; } },
               focus() {}, _children: [], scrollTop: 0, scrollHeight: 100,
+              addEventListener() {}, removeEventListener() {},   // chat composer handlers
+              setSelectionRange() {},                            // chat "Reply" caret
               classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } } };
   Object.defineProperty(o, 'innerHTML', { get() { return o._html; }, set(v) { o._html = String(v); o._children = []; } });
   return o;

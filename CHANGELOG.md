@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.5.3 (2026-11)
+
+### Added
+
+- **Chat — code block actions (Save / Reply).** Every Markdown code block
+  in the chat transcript now gets two compact action bars: one ABOVE and
+  one BELOW the code (reachable without scrolling long blocks).
+  **Save** downloads exactly that block's code client-side (`Blob` +
+  `<a download>`, no server round-trip): fences and the language tag are
+  stripped, the filename/extension is derived from the language tag
+  (`python` → `script.py`, `bash` → `script.sh`, `json` → `data.json`,
+  …, full table in `docs/CHAT-CODE-ACTIONS.md`); unknown or missing
+  language → `snippet.txt`. **Reply** quotes this specific block into the
+  existing composer (````lang\n<code>\n``` ` + an editable lead-in) and
+  never auto-sends — the user edits and presses Send themselves; the
+  value is set via `input.value`, so code containing HTML/JS cannot
+  execute. The composer was upgraded from a single-line `<input>` to an
+  autosizing `<textarea>` (Enter sends, Shift+Enter inserts a newline) —
+  required for editing quoted code. Streaming-safe by construction:
+  per-delta and final renders both go through `renderChatBody()` (render
+  + decorate), the whole reply subtree is replaced per render so action
+  bars can never duplicate, handlers bind only to freshly created
+  buttons (no delegation, no listener leaks), and `decorateCodeActions()`
+  is idempotent. Markdown/XSS pipeline (marked + DOMPurify), syntax
+  highlighting hooks (`language-*` classes), Stop and plain-text
+  Markdown are untouched. Tests: `tests/test_chat_code_actions.py` —
+  11 jsdom scenarios against the REAL chat.js + md.js + marked +
+  DOMPurify (placement, block targeting, fence stripping, extensions,
+  .txt fallback, no-auto-send, XSS-through-composer, streaming dedup,
+  listener-leak, DOM order) + a source-wiring contract test. Docs:
+  `docs/CHAT-CODE-ACTIONS.md`.
+
 ## 1.5.2 (2026-11)
 
 ### Changed
