@@ -1,5 +1,92 @@
 # Dashboard v3 — visual redesign + REAL hardware metrics (2026-11)
 
+## v3.2 — финальная компоновка Hardware Cards (уборка дублей)
+
+### Проблема v3.1
+
+Карточки дублировали значения: рядом с основным процентом выводился
+второй (в подписи ring'а и в `hw-pct-sub`), RAM/Storage показывали
+`used / total` дважды (подпись + kv), GPU имел лишний `Clocks` и
+`Model VRAM (Ollama)` рядом с VRAM, CPU — строку load с threads.
+Карточки были высокими с пустотой снизу, высоты не совпадали.
+
+### Новая структура (единая для всех четырёх карточек)
+
+```
+┌──────────────────────────────────────────┐
+│ [icon] NAME                      (ring)  │   ← head: иконка + имя + ring справа
+│ 15%                                      │   ← ЕДИНСТВЕННЫЙ крупный процент
+│ (Tesla V100-SXM2-16GB)                   │   ← только GPU: имя устройства
+│ ──────────────────────────────────────── │   ← kv-строка с border-top,
+│ USED        FREE          TOTAL          │     прижата к низу (margin-top:auto)
+│ 2.6 GB      1.6 GB        16.7 GB        │
+└──────────────────────────────────────────┘
+```
+
+- **RING — ровно один на карточку**, живёт в строке заголовка справа
+  (`.hw-head-ring`, 44px) и является **чистым индикатором**: текст внутри
+  ring'а убран (пустой `<text>`), значение видно по hover-title. Основной
+  процент — единственное крупное число. GPU-ring отражает VRAM
+  (основное число — utilization), подпись в title.
+- **CPU**: убраны `load 0.42 / 8 threads` и model-line; остались
+  pct + ring + kv `CORES / THREADS / FREQUENCY`.
+- **RAM**: убран sub `2.6 GB / 16.7 GB`; остались pct + ring + kv
+  `USED / FREE / TOTAL` (одна горизонтальная строка).
+- **GPU**: убраны `Clocks`, `Fan PWM` (объединён в один `Fan`),
+  `Model VRAM (Ollama)`, `utilization`-лейбл, ring-cap `4.8 / 16.2 GB`,
+  sysLine (CUDA/driver). kv стал: `POWER / TEMP / VRAM (used/total) /
+  FAN / CPU-GPU`.
+- **CPU/GPU split** (новое, только существующие данные): агрегат по
+  списку running из **того же** `snap.ollama.running` (`/api/ps`) —
+  `sum(size_vram) / sum(size)`: `<100% → "35% / 65%"` (CPU/GPU),
+  `=100% → "0% / 100%"`; нет size+size_vram ни у одной модели или
+  Ollama offline/недоступен → `—` (не выдумывается). Подпись title:
+  «derived from /api/ps size vs size_vram — not a telemetry split».
+  Это та же деривация, что в таблице Running (splitInfo), а не новый
+  источник телеметрии.
+- **Storage**: убран sub `617.8 GB / 994.5 GB`; остались pct + ring + kv.
+
+### Layout
+
+- `.hw-card`: landscape-компакт, `min-height: 148px`, kv прижат к низу
+  (`margin-top: auto`) — карточки одной высоты без пустоты;
+- desktop ≥1181px: **4 карточки в ряд**; 641–1180px: **2**; ≤640px: **1**;
+- kv-строка горизонтальная на desktop (`flex-wrap: nowrap`);
+  fallback ≤480px: перенос в 2 колонки, `white-space: normal`;
+- GPU kv — 5 ячеек (после удаления Clocks), сноски mini-GPU
+  (2-й и далее GPU) и partition-foot сохранены.
+
+### Иконки
+
+Профессиональные inline SVG из v3.1 сохранены без изменений, emoji не
+возвращались.
+
+### Архитектура
+
+Backend/API/telemetry/realtime/polling/Electricity/NVMe — без изменений.
+Единственное изменение потока данных внутри страницы: `drawGpu` теперь
+принимает второй аргумент `snap.ollama` (тот же снапшот, уже
+использовавшийся таблицей Running) — нового запроса/сэмплера нет.
+
+### Тесты v3.2 (`tests/test_dashboard_v3_frontend.py`, 22 jsdom-сценария + 3 python-теста)
+
+Новые/обновлённые проверки:
+- **no dupes**: у CPU/RAM/GPU/Storage ровно один `hw-pct`; нет
+  `hw-pct-sub`; нет load-строки у CPU; ring без внутреннего текста;
+- **Clocks** отсутствует; **CPU/GPU split** существует, формат `N% / M%`,
+  агрегат считается по /api/ps-строкам, full-gpu → `0% / 100%`,
+  отсутствие данных → `—`, derivation-note на месте;
+- **один ring** на карточку (jsdom + python-проверка исходника);
+- **порядок** head → pct → kv для всех карточек;
+- **responsive**: 4/2/1 колонки, nowrap kv на desktop, wrap-фолбэк
+  ≤480px, min-height карточек (python-тест CSS);
+- **zero/offline semantics** (0% → `0%`, 0 B → `0 B`, offline → `—`)
+  сохранены и проходят;
+- исходник не содержит удалённых id (`dash-cpu-load`, `dash-ram-sub`,
+  `dash-disk-sub`, `dash-gpu-vram-cap`, `dash-modelvram`, Clocks-ячейку).
+
+---
+
 ## v3.1 UI polish: иконки + композиция карточек
 
 ### 1. Иконки — emoji → единый набор inline SVG
@@ -64,7 +151,7 @@ single-source architecture, Electricity, NVMe — только разметка 
 
 ### Регрессионные тесты (v3.1)
 
-Добавлены 2 сценария в `tests/test_dashboard_v3_frontend.py` (итого 20):
+Добавлены 2 сценария в `tests/test_dashboard_v3_frontend.py` (итого 20 в v3.1; после v3.2 — 22):
 
 - **«icons: no emoji anywhere, monochrome inline SVG markup instead»** —
   отсутствие emoji во всей разметке, наличие SVG-иконок в 4 hw-карточках,

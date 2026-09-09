@@ -308,7 +308,7 @@
     if (snap.jobs) drawJobsTile(snap.jobs);
     if (snap.cpu) drawCpu(snap.cpu);
     if (snap.ram) drawRam(snap.ram);
-    if (snap.gpu) drawGpu(snap.gpu);
+    if (snap.gpu) drawGpu(snap.gpu, snap.ollama);
     if (snap.disk) drawStorage(snap.disk);
   }
 
@@ -323,26 +323,21 @@
     if (sub) sub.textContent = `${active} active · ${list.length} recent · open Jobs →`;
   }
 
-  /* ---- HARDWARE: CPU card (SystemCollector via the shared snapshot) ---- */
+  /* ---- HARDWARE: CPU card (SystemCollector via the shared snapshot).
+   * v3.2 composition: head(icon+name+ring) → main pct → kv row. No dup
+   * percent near the ring, no load line — cores/threads/freq live in kv. */
   function drawCpu(cpu) {
     const el = document.getElementById("dash-hw-cpu");
     if (!el) return;
     const pct = fmtPct(cpu.percent);                       // 0 → "0%", 100 → "100%"
-    const load = [cpu.load_1, cpu.load_5, cpu.load_15].map((x) => (x == null ? null : Number(x)));
     const threads = cpu.threads != null ? Number(cpu.threads) : null;
-    const loadRatio = load[0] != null && threads ? Math.min(100, (load[0] / threads) * 100) : null;
     const freq = cpu.frequency && cpu.frequency.current != null ? fmtMhz(cpu.frequency.current) : null;
     el.innerHTML = `
-      <div class="hw-card-head"><span class="hw-icon">${iconSvg("cpu")}</span><span class="hw-name">CPU</span></div>
-      <div class="hw-model-line" title="${esc(cpu.model || "")}">${cpu.model ? esc(cpu.model) : ""}</div>
-      <div class="hw-main">
-        <div class="hw-pct-block">
-          <div class="hw-pct" id="dash-cpu-pct">${orDash(pct)}</div>
-          <div class="hw-pct-sub" id="dash-cpu-load">${load[0] != null ? `load ${load[0].toFixed(2)}${threads ? ` / ${threads} threads` : ""}` : "—"}</div>
-        </div>
-        <div class="hw-ring-wrap">${ringSvg(cpu.percent, orDash(pct))}</div>
+      <div class="hw-card-head">
+        <span class="hw-icon">${iconSvg("cpu")}</span><span class="hw-name">CPU</span>
+        <span class="hw-head-ring" title="CPU ${orDash(pct)}">${ringSvg(cpu.percent, "")}</span>
       </div>
-      ${loadRatio != null ? barHtml(loadRatio) : ""}
+      <div class="hw-pct" id="dash-cpu-pct">${orDash(pct)}</div>
       <div class="hw-kv">
         <div><div class="k">Cores</div><div class="v" id="dash-cpu-cores">${cpu.cores != null ? esc(String(cpu.cores)) : "—"}</div></div>
         <div><div class="k">Threads</div><div class="v" id="dash-cpu-threads">${threads != null ? esc(String(threads)) : "—"}</div></div>
@@ -350,21 +345,19 @@
       </div>`;
   }
 
-  /* ---- HARDWARE: RAM card (SystemCollector / psutil — never model sizes) ---- */
+  /* ---- HARDWARE: RAM card (SystemCollector / psutil — never model sizes).
+   * v3.2: the ONLY percentage is the main value + its ring; used/total
+   * live once, in the kv row. */
   function drawRam(ram) {
     const el = document.getElementById("dash-hw-ram");
     if (!el) return;
     const pct = fmtPct(ram.percent);                       // 0 → "0%", 100 → "100%"
     el.innerHTML = `
-      <div class="hw-card-head"><span class="hw-icon">${iconSvg("ram")}</span><span class="hw-name">RAM</span></div>
-      <div class="hw-main">
-        <div class="hw-pct-block">
-          <div class="hw-pct">${orDash(pct)}</div>
-          <div class="hw-pct-sub" id="dash-ram-sub">${ram.used != null && ram.total != null ? `${fmtBytes(ram.used)} / ${fmtBytes(ram.total)}` : "—"}</div>
-        </div>
-        <div class="hw-ring-wrap">${ringSvg(ram.percent, orDash(pct))}</div>
+      <div class="hw-card-head">
+        <span class="hw-icon">${iconSvg("ram")}</span><span class="hw-name">RAM</span>
+        <span class="hw-head-ring" title="RAM ${orDash(pct)}">${ringSvg(ram.percent, "")}</span>
       </div>
-      ${ram.total ? barHtml(ram.percent) : ""}
+      <div class="hw-pct" id="dash-ram-pct">${orDash(pct)}</div>
       <div class="hw-kv">
         <div><div class="k">Used</div><div class="v" id="dash-ram-used">${ram.used != null ? fmtBytes(ram.used) : "—"}</div></div>
         <div><div class="k">Free</div><div class="v" id="dash-ram-free">${ram.free != null ? fmtBytes(ram.free) : "—"}</div></div>
@@ -373,16 +366,19 @@
   }
 
   /* ---- HARDWARE: GPU card — the ONE shared snapshot (GPUCollector).
-   * GPU utilization ≠ VRAM: utilization is the big number, VRAM has its
-   * own ring. Model VRAM (Ollama size_vram) is a separate metric and is
-   * always labelled as such. Multi-GPU: extra rows, devices never collapse. */
-  function drawGpu(gpu) {
+   * v3.2: utilization is the single big number (+ its ring in the head);
+   * VRAM lives once in the kv row; Clocks removed; CPU/GPU split derived
+   * from /api/ps size vs size_vram (— when unavailable, never invented).
+   * Multi-GPU: extra rows, devices never collapse. */
+  function drawGpu(gpu, ollama) {
     const el = document.getElementById("dash-hw-gpu");
     if (!el) return;
     if (!gpu.available) {
       // explicit unavailable — GPU-less hosts are NORMAL, not an error
       el.innerHTML = `
-        <div class="hw-card-head"><span class="hw-icon">${iconSvg("gpu")}</span><span class="hw-name">GPU</span></div>
+        <div class="hw-card-head">
+          <span class="hw-icon">${iconSvg("gpu")}</span><span class="hw-name">GPU</span>
+        </div>
         <div class="hw-loading" style="padding:6px 0 2px">${iconSvg("gpu")} ${esc(gpu.reason || "No NVIDIA GPU detected on this host")}</div>
         <div class="hw-foot">CPU-only Ollama works fine — this card fills in automatically when an NVIDIA GPU is present.</div>`;
       return;
@@ -391,42 +387,49 @@
     const g = gpus[0] || null;
     if (!g) {
       el.innerHTML = `
-        <div class="hw-card-head"><span class="hw-icon">${iconSvg("gpu")}</span><span class="hw-name">GPU</span></div>
+        <div class="hw-card-head">
+          <span class="hw-icon">${iconSvg("gpu")}</span><span class="hw-name">GPU</span>
+        </div>
         <div class="hw-loading">GPU available, no devices reported — check the GPU page for details.</div>`;
       return;
     }
     const utilPct = fmtPct(g.utilization);
-    const vramPct = g.vram_total ? (g.vram_used / g.vram_total) * 100 : null;
-    const modelVram = gpu.ollama_vram && gpu.ollama_vram.total_vram;
-    const sysLine = [g.cuda_version ? `CUDA ${esc(g.cuda_version)}` : (gpu.cuda_version ? `CUDA ${esc(gpu.cuda_version)}` : null),
-                     (g.driver_version || gpu.driver_version) ? `driver ${esc(g.driver_version || gpu.driver_version)}` : null
-                    ].filter(Boolean).join(" · ");
+    const vramPct = g.vram_total && g.vram_used != null ? (g.vram_used / g.vram_total) * 100 : null;
+    // CPU/GPU split — aggregate over the /api/ps running list (same data
+    // source as the Running table): sum(size) vs sum(size_vram). Honest
+    // dash when nothing reports both fields.
+    const running = Array.isArray(ollama && ollama.running) ? ollama.running : [];
+    let sz = 0, vr = 0, any = false;
+    for (const m of running) {
+      if (!m || !(m.size > 0) || !(m.size_vram > 0)) continue;
+      sz += m.size; vr += m.size_vram; any = true;
+    }
+    const split = any
+      ? (vr < sz
+          ? `${100 - Math.round((vr / sz) * 100)}% / ${Math.round((vr / sz) * 100)}%`
+          : "0% / 100%")
+      : "—";
+    const fan = g.fan_available && g.fan_target != null ? Math.round(g.fan_target) + "%"
+      : (g.fan_available && g.fan_pwm != null ? Math.round(g.fan_pwm) + "%" : "—");
     const extra = gpus.slice(1).map((x) => {
       const vp = x.vram_total ? ((x.vram_used / x.vram_total) * 100).toFixed(0) + "%" : "—";
       return `<div class="hw-mini-gpu">#${esc(String(x.index))} ${esc(x.name || "GPU")} — ${orDash(fmtPct(x.utilization))} · ${orDash(fmtGb(x.vram_used))} / ${orDash(fmtGb(x.vram_total))} (${vp}) · ${orDash(fmtTempC(x.temperature))}</div>`;
     }).join("");
     el.innerHTML = `
-      <div class="hw-card-head"><span class="hw-icon">${iconSvg("gpu")}</span><span class="hw-name">GPU</span></div>
-      <div class="hw-model-line" title="${esc(g.name || "")}">${esc(g.name || "GPU")}</div>
-      <div class="hw-main">
-        <div class="hw-pct-block">
-          <div class="hw-pct" id="dash-gpu-pct">${orDash(utilPct)}</div>
-          <div class="hw-pct-sub">utilization</div>
-        </div>
-        <div class="hw-ring-wrap">${ringSvg(vramPct, vramPct != null ? Math.round(vramPct) + "%" : "—")}
-          <div class="hw-ring-cap" id="dash-gpu-vram-cap">${g.vram_used != null && g.vram_total != null ? `${fmtGb(g.vram_used)} / ${fmtGb(g.vram_total)}` : "—"}</div>
-        </div>
+      <div class="hw-card-head">
+        <span class="hw-icon">${iconSvg("gpu")}</span><span class="hw-name">GPU</span>
+        <span class="hw-head-ring" title="VRAM ${vramPct != null ? Math.round(vramPct) + "%" : "—"}">${ringSvg(vramPct != null ? vramPct : g.utilization, "")}</span>
       </div>
+      <div class="hw-pct" id="dash-gpu-pct">${orDash(utilPct)}</div>
+      <div class="hw-model-line" id="dash-gpu-name" title="${esc(g.name || "")}">${esc(g.name || "GPU")}</div>
       ${g.vram_total ? barHtml(vramPct) : ""}
       <div class="hw-kv">
         <div><div class="k">Power</div><div class="v" id="dash-power">${orDash(fmtWatts(g.power_draw))}</div></div>
-        <div><div class="k">Temperature</div><div class="v" id="dash-temp">${orDash(fmtTempC(g.temperature))}</div></div>
-        <div><div class="k">Model VRAM (Ollama)</div><div class="v" id="dash-modelvram" title="sum of running models' size_vram from /api/ps — not GPU telemetry">${modelVram ? fmtGb(modelVram) : "—"}</div></div>
-        <div><div class="k">Fan Target</div><div class="v">${g.fan_available && g.fan_target != null ? Math.round(g.fan_target) + "%" : "—"}</div></div>
-        <div><div class="k">Fan PWM</div><div class="v">${g.fan_available && g.fan_pwm != null ? Math.round(g.fan_pwm) + "%" : "—"}</div></div>
-        <div><div class="k">Clocks</div><div class="v">${g.clocks != null ? g.clocks + " MHz" : "—"}</div></div>
+        <div><div class="k">Temp</div><div class="v" id="dash-temp">${orDash(fmtTempC(g.temperature))}</div></div>
+        <div><div class="k">VRAM</div><div class="v" id="dash-vram" title="GPU VRAM (NVML) — used / total">${g.vram_used != null && g.vram_total != null ? `${fmtGb(g.vram_used)} / ${fmtGb(g.vram_total)}` : "—"}</div></div>
+        <div><div class="k">Fan</div><div class="v" title="${g.fan_available && g.fan_target != null ? "fan target" : "fan PWM"}">${fan}</div></div>
+        <div><div class="k">CPU / GPU</div><div class="v" id="dash-cpusplit" title="derived from /api/ps size vs size_vram across running models — not a telemetry split">${split}</div></div>
       </div>
-      ${sysLine ? `<div class="hw-foot" id="dash-gpu-sys">${sysLine}</div>` : ""}
       ${extra ? `<div class="hw-mini-gpus">${extra}</div>` : ""}`;
   }
 
@@ -443,15 +446,11 @@
     }
     const pct = fmtPct(disk.percent);
     el.innerHTML = `
-      <div class="hw-card-head"><span class="hw-icon">${iconSvg("storage")}</span><span class="hw-name">Storage</span></div>
-      <div class="hw-main">
-        <div class="hw-pct-block">
-          <div class="hw-pct">${orDash(pct)}</div>
-          <div class="hw-pct-sub" id="dash-disk-sub">${fmtBytes(disk.used)} / ${fmtBytes(disk.total)}</div>
-        </div>
-        <div class="hw-ring-wrap">${ringSvg(disk.percent, orDash(pct))}</div>
+      <div class="hw-card-head">
+        <span class="hw-icon">${iconSvg("storage")}</span><span class="hw-name">Storage</span>
+        <span class="hw-head-ring" title="Storage ${orDash(pct)}">${ringSvg(disk.percent, "")}</span>
       </div>
-      ${barHtml(disk.percent)}
+      <div class="hw-pct" id="dash-disk-pct">${orDash(pct)}</div>
       <div class="hw-kv">
         <div><div class="k">Used</div><div class="v" id="dash-disk-used">${fmtBytes(disk.used)}</div></div>
         <div><div class="k">Free</div><div class="v" id="dash-disk-free">${fmtBytes(disk.free)}</div></div>

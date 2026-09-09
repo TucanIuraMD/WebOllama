@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.5.2 (2026-11)
+
+### Changed
+
+- **Dashboard v3.2 — final Hardware Cards layout (dedup).** The four
+  hardware cards are compact landscape cards with one identical structure:
+  head (inline-SVG icon + name + ONE ring indicator on the right) → the
+  SINGLE large percentage → (GPU only: device name) → kv row pinned to the
+  card bottom. Removed all duplicated values: CPU's `load x / n threads`
+  sub-line and model line; RAM's and Storage's duplicated `used / total`
+  sub-lines; GPU's `utilization` label, ring cap (`x / y GB`), `Model VRAM
+  (Ollama)` cell, `Fan PWM` (merged into one `Fan`), sysLine and
+  `Clocks`. The GPU kv row is now POWER / TEMP / VRAM (used/total, NVML) /
+  FAN / **CPU-GPU** — the new split aggregates the SAME `/api/ps` running
+  list already used by the Running table (`sum(size_vram)/sum(size)`,
+  e.g. `35% / 65%`; full GPU offload renders `0% / 100%`; when no model
+  reports both fields or Ollama is offline it honestly renders `—`, never
+  an invented number). Rings are pure indicators now (no percentage text
+  inside; value on hover), so the main percentage is the only large
+  numeric value. Layout: desktop 4 cards per row / tablet 2 / mobile 1;
+  uniform card height (`min-height`, kv `margin-top: auto`); the kv row
+  stays horizontal on desktop and wraps only under 480px. UI-only —
+  backend, API, telemetry, realtime/WebSocket, polling, Electricity and
+  NVMe untouched; `drawGpu` now also receives the SAME `snap.ollama` the
+  Running table already uses (no new sampler, no new request). Tests:
+  `tests/test_dashboard_v3_frontend.py` extended to 22 jsdom cases +
+  2 new python source tests (dedup contract, one-ring-per-card,
+  4/2/1 responsive CSS contract); zero/offline semantics preserved.
+  Docs: `docs/DASHBOARD-V3.md` §"v3.2".
+
 ## 1.5.1 (2026-11)
 
 ### Changed

@@ -183,7 +183,7 @@ await run('loading first, then full render', async () => {
   apiRoutes = { ...FULL_ROUTES, '/api/system/processor': () => Promise.reject(new Error('offline')) };
   await renderPage();
   assert(el('dash-hw-cpu'), 'cpu card exists');
-  assert(html('dash-hw-cpu').includes('i7-7700K'), 'cpu model shown');
+  assert(text('dash-cpu-pct') !== null, 'cpu card rendered');
   assert(text('dash-cpu-pct') === '0%', 'CPU 0% renders as 0%, got ' + text('dash-cpu-pct'));
   assert(html('dash-hw-cpu').includes('8'), 'threads shown');
   assert(text('dash-ram-used') === '31.6 GB', 'RAM used, got ' + text('dash-ram-used'));
@@ -194,7 +194,7 @@ await run('loading first, then full render', async () => {
   assert(html('dash-hw-gpu').includes('Tesla V100-SXM2-16GB'), 'GPU model');
   assert(text('dash-power') === '40.3 W', 'power, got ' + text('dash-power'));
   assert(text('dash-temp') === '45°C', 'temp, got ' + text('dash-temp'));
-  assert(text('dash-gpu-vram-cap') === '4.8 GB / 16.2 GB', 'VRAM ring cap, got ' + text('dash-gpu-vram-cap'));
+  assert(text('dash-vram') === '4.8 GB / 16.2 GB', 'VRAM kv, got ' + text('dash-vram'));
   assert(html('dash-hw-storage').includes('20%'), 'storage percent');
   assert(text('dash-models-count') === '12', 'models count');
   assert(text('dash-running-count') === '2', 'running count');
@@ -225,7 +225,7 @@ await run('zero values are values (CPU 0, RAM 0, GPU 0, VRAM 0, power 0)', async
   assert(html('dash-hw-ram').includes('>0%<'), 'RAM 0% kept');
   assert(text('dash-ram-used') === '0 B', 'RAM used 0 bytes, got ' + text('dash-ram-used'));
   assert(text('dash-gpu-pct') === '0%', 'GPU util 0% kept');
-  assert(text('dash-gpu-vram-cap') === '0 GB / 16.2 GB', 'VRAM 0 kept, got ' + text('dash-gpu-vram-cap'));
+  assert(text('dash-vram') === '0 GB / 16.2 GB', 'VRAM 0 kept, got ' + text('dash-vram'));
   assert(text('dash-power') === '0 W', 'power 0 kept, got ' + text('dash-power'));
   // and 100% semantics
   const full = JSON.parse(JSON.stringify(SNAPSHOT));
@@ -237,7 +237,7 @@ await run('zero values are values (CPU 0, RAM 0, GPU 0, VRAM 0, power 0)', async
 await run('partial snapshot preserves last-known values', async () => {
   // a partial snapshot WITHOUT cpu/ram/gpu must not wipe the cards
   dash.drawSnapshot({ ollama: SNAPSHOT.ollama }, '');
-  assert(html('dash-hw-cpu').includes('i7-7700K'), 'cpu card preserved');
+  assert((html('dash-hw-cpu') || '').includes('class="hw-pct"'), 'cpu card preserved');
   assert(html('dash-hw-gpu').includes('Tesla'), 'gpu card preserved');
   // partial running list (missing) must not wipe the table
   assert(html('dash-running').includes('qwen3:8b'), 'running table preserved');
@@ -249,7 +249,7 @@ await run('GPU unavailable renders honest state, CPU/RAM intact', async () => {
   dash.drawSnapshot(noGpu, '');
   assert(html('dash-hw-gpu').includes('no NVIDIA GPU'), 'gpu reason shown');
   assert(!html('dash-hw-gpu').includes('Tesla'), 'no stale GPU data');
-  assert(html('dash-hw-cpu').includes('i7-7700K'), 'cpu unaffected');
+  assert((html('dash-hw-cpu') || '').includes('class="hw-pct"'), 'cpu unaffected');
 });
 
 await run('Ollama offline: running table reports offline, no fake rows', async () => {
@@ -380,48 +380,105 @@ await run('icons: no emoji anywhere, monochrome inline SVG markup instead', asyn
   assert(ic('power').includes('path'), 'Electricity icon = power/bolt');
 });
 
-await run('hw-card composition: main left, ring right, full-width bar, one kv row', async () => {
-  // uniform structure for RAM / GPU / Storage: hw-main (pct-block + ring-wrap)
-  // → hw-bar → hw-kv with exactly 3 cells (USED/FREE/TOTAL semantics)
+await run('hw-card composition v3.2: head icon+name+ring, single pct, kv row — no dupes', async () => {
+  // v3.2: head(icon + name + ONE ring on the right) → single big pct → kv
+  // row. No second percentage near the ring, no used/total duplication.
   for (const [id, kvKeys] of [
+    ['dash-hw-cpu', ['Cores', 'Threads', 'Frequency']],
     ['dash-hw-ram', ['Used', 'Free', 'Total']],
-    ['dash-hw-gpu', ['Power', 'Temperature']],
+    ['dash-hw-gpu', ['Power', 'Temp', 'VRAM', 'Fan', 'CPU / GPU']],
     ['dash-hw-storage', ['Used', 'Free', 'Total']],
   ]) {
     const card = html(id) || '';
-    const mainIdx = card.indexOf('<div class="hw-main">');
-    const ringIdx = card.indexOf('hw-ring-wrap');
-    const barIdx = card.indexOf('hw-bar');
+    const headIdx = card.indexOf('hw-card-head');
+    const ringCount = (card.match(/class="hw-ring"/g) || []).length;
     const kvIdx = card.indexOf('<div class="hw-kv">');
-    assert(mainIdx !== -1, `hw-main missing in ${id}`);
-    assert(card.includes('class="hw-pct-block"') && card.includes('class="hw-pct"'), `main metric (left) missing in ${id}`);
-    assert(ringIdx !== -1 && mainIdx < ringIdx, `ring indicator (right) missing in ${id}`);
-    assert(barIdx !== -1 && mainIdx < barIdx && barIdx < kvIdx, `${id}: bar must sit between main and kv (full-width below)`);
-    const mainChunk = card.slice(mainIdx, ringIdx + 40);
-    assert(mainChunk.includes('hw-pct') && mainChunk.includes('hw-ring-wrap'), `${id}: main block must pair metric + ring`);
-    // kv block runs to the closing `</div>` that precedes the NEXT section
-    // (hw-foot / hw-mini-gpus) or the template end — extract by slicing to
-    // the next top-level marker instead of a fragile lazy regex (cells
-    // contain nested </div></div> pairs)
+    assert(headIdx !== -1, `head missing in ${id}`);
+    assert(ringCount === 1, `${id}: exactly ONE ring required, got ${ringCount}`);
+    const ringIdx = card.indexOf('hw-head-ring');
+    const headEnd = card.indexOf('</div>', headIdx);
+    assert(ringIdx > headIdx && headEnd !== -1 && ringIdx < headEnd, `ring must sit INSIDE the head row in ${id}`);
+    assert(kvIdx !== -1, `kv row missing in ${id}`);
     const nextSection = ['hw-foot', 'hw-mini-gpus'].map((m) => card.indexOf(m, kvIdx)).filter((i) => i > 0);
     const kvEnd = nextSection.length ? Math.min(...nextSection) : card.length;
     const kv = card.slice(kvIdx, kvEnd);
-    assert(kv.includes('class="k"'), `kv row missing in ${id}`);
+    assert(kv.includes('class="k"'), `kv cells missing in ${id}`);
     for (const k of kvKeys) assert(kv.includes(`>${k}</div>`), `${id}: kv key ${k} missing`);
+  }
+  // --- no duplicated percentages ---
+  // CPU: exactly one "N%" as the big value; the ring is EMPTY (no text)
+  const cpuCard = html('dash-hw-cpu') || '';
+  assert((cpuCard.match(/class="hw-pct"/g) || []).length === 1, 'CPU: exactly one big pct');
+  assert(!/hw-ring-text[^>]*>[^<]+</.test(cpuCard), 'CPU ring must be a pure indicator (no inner %)');
+  assert(!/load \d/.test(cpuCard), 'CPU: no load sub-line');
+  assert(!cpuCard.includes('hw-pct-sub'), 'CPU: no duplicate sub value');
+  // RAM: one pct; no "used / total" next to it
+  const ramCard = html('dash-hw-ram') || '';
+  assert((ramCard.match(/class="hw-pct"/g) || []).length === 1, 'RAM: exactly one big pct');
+  assert(!ramCard.includes('hw-pct-sub'), 'RAM: no duplicate sub value near the pct');
+  assert(!/GB \/ \d+(\.\d+)? GB</.test(ramCard.replace(/id="dash-ram-[\w]+"[^>]*>\d+(\.\d+)? GB<\//g, '')), 'RAM: used/total appears only in kv');
+  // GPU: utilization pct once; Clocks removed; CPU/GPU split present
+  const gpuCard = html('dash-hw-gpu') || '';
+  assert((gpuCard.match(/class="hw-pct"/g) || []).length === 1, 'GPU: exactly one big pct');
+  assert(!gpuCard.includes('Clocks'), 'GPU: Clocks removed');
+  assert(text('dash-cpusplit') !== undefined, 'GPU: CPU/GPU split cell exists');
+  // Storage: one pct; no used/total next to it
+  const stCard = html('dash-hw-storage') || '';
+  assert((stCard.match(/class="hw-pct"/g) || []).length === 1, 'Storage: exactly one big pct');
+  assert(!stCard.includes('hw-pct-sub'), 'Storage: no duplicate sub value');
+  // uniform order: head → pct → (device name for GPU) → bar? → kv
+  for (const id of ['dash-hw-cpu', 'dash-hw-ram', 'dash-hw-gpu', 'dash-hw-storage']) {
+    const c = html(id) || '';
+    const head = c.indexOf('hw-card-head');
+    const pct = c.indexOf('class="hw-pct"');
+    const kv = c.indexOf('<div class="hw-kv">');
+    assert(head < pct && pct < kv, `${id}: order must be head → pct → kv`);
   }
   // RAM kv is ONE horizontal row: exactly 3 label cells
   const ramKv = html('dash-hw-ram') || '';
   const ramKvStart = ramKv.indexOf('<div class="hw-kv">');
   const ramKvBlock = ramKv.slice(ramKvStart, ramKv.indexOf('</div>', ramKv.indexOf('dash-ram-total')));
   assert((ramKvBlock.match(/<div class="k">/g) || []).length === 3, 'RAM kv must have exactly 3 cells');
-  // CPU keeps its own logical structure (no fake Used/Free/Total)
-  const cpuCard = html('dash-hw-cpu') || '';
-  assert(cpuCard.includes('hw-pct') && cpuCard.includes('Cores') && cpuCard.includes('Threads'), 'CPU card structure intact');
-  assert(!cpuCard.includes('>Free<'), 'CPU card must not fake storage-style kv');
 });
 
-await run('PROCESSOR render: good data, unavailable, garbage — no NaN/undefined', async () => {
-  await dash.renderProcessor({ available: true, host: 'h', cpu: { utilization: 42, load: [3.2, 2.8] }, gpu_available: true,
+await run('GPU CPU/GPU split: real /api/ps aggregate, honest dash, full-gpu, split', async () => {
+  // aggregate split over the SAME /api/ps rows the Running table uses
+  // deepseek 8.9/6.1 (partial) + qwen 4.7/4.7 (full): sz=13.6, vr=10.8 → 79/21... aggregated:
+  dash.drawSnapshot(SNAPSHOT, '');
+  let s = text('dash-cpusplit');
+  // sz=13.6 vr=10.8 → 79%/21%... exact: Math.round(10.8/13.6*100)=79 → "21% / 79%"
+  assert(/^\d+% \/ \d+%$/g.test(s), 'aggregate split format, got ' + s);
+  // full-gpu only
+  const only = JSON.parse(JSON.stringify(SNAPSHOT));
+  only.ollama.running = [{ name: 'q3', size: 4.7e9, size_vram: 4.7e9 }];
+  dash.drawGpu(SNAPSHOT.gpu, only.ollama);
+  assert(text('dash-cpusplit') === '0% / 100%', 'full-gpu split, got ' + text('dash-cpusplit'));
+  // no split data → honest dash (never invented)
+  const none = JSON.parse(JSON.stringify(SNAPSHOT));
+  none.ollama.running = [{ name: 'x' }];
+  dash.drawGpu(SNAPSHOT.gpu, none.ollama);
+  assert(text('dash-cpusplit') === '—', 'no split → dash, got ' + text('dash-cpusplit'));
+  // ollama missing entirely → dash
+  dash.drawGpu(SNAPSHOT.gpu, undefined);
+  assert(text('dash-cpusplit') === '—', 'no ollama → dash');
+  // honest derivation note
+  assert(html('dash-hw-gpu').includes('derived from /api/ps size vs size_vram'), 'split derivation note');
+});
+
+await run('v3.2 layout: 4/2/1 grid + landscape cards + kv stays horizontal', async () => {
+  const css = document.querySelector('style') ? document.documentElement : null;
+  const appCss = App.state.appCssText || '';
+  // CSS is loaded as a file in production; verify the source rules instead
+  const cssSrc = typeof DASH_CSS_SRC !== 'undefined' ? DASH_CSS_SRC : '';
+  if (!cssSrc) return; // CSS source not embedded in this harness — rules verified by python source test
+  assert(cssSrc.includes('grid-template-columns: repeat(4, minmax(0, 1fr))'), 'desktop 4 cards');
+  assert(/@media \(max-width: 1180px\)[\s\S]*?repeat\(2, minmax\(0, 1fr\)\)/.test(cssSrc), 'tablet 2 cards');
+  assert(/@media \(max-width: 640px\)[\s\S]*?grid-template-columns: 1fr/.test(cssSrc), 'mobile 1 card');
+  assert(cssSrc.includes('min-height'), 'uniform landscape card height');
+  assert(!/hw-kv\s*{[^}]*flex-wrap:\s*wrap/.test(cssSrc.split('@media (max-width: 480px)')[0] || ''), 'desktop kv stays horizontal');
+});
+
+await run('PROCESSOR render: good data, unavailable, garbage — no NaN/undefined', async () => {  await dash.renderProcessor({ available: true, host: 'h', cpu: { utilization: 42, load: [3.2, 2.8] }, gpu_available: true,
     gpus: [], ollama: { online: true, running_models: [{ name: 'qwen3:8b', size_vram: 6.8e9 }] } });
   let t = html('proc-body');
   assert(t.includes('42%') && t.includes('Load 3.2 / 2.8'), 'cpu card wrong: ' + t.slice(0, 120));
@@ -546,6 +603,46 @@ def test_dashboard_polling_discipline():
     assert "App.state.currentPage !== \"dashboard\"" in src  # page-scoped
     # no direct GPU telemetry fetching — the snapshot is the single source
     assert "/api/gpu" not in src
+
+
+def test_dashboard_v32_layout_css():
+    """v3.2 responsive contract: 4 cards on desktop, 2 on tablet, 1 on
+    mobile; landscape cards with a uniform min-height; kv stays one
+    horizontal row on desktop and only wraps under 480px."""
+    css = (DASHBOARD_JS.parent.parent.parent.parent / "static" / "css" / "app.css").read_text()
+    assert ".hw-grid" in css and "grid-template-columns: repeat(4, minmax(0, 1fr))" in css
+    assert "@media (max-width: 1180px)" in css and "repeat(2, minmax(0, 1fr))" in css
+    assert "@media (max-width: 640px)" in css
+    # min-height keeps the four cards the same landscape height
+    assert "min-height" in css.split(".hw-kv")[0].split(".hw-card {")[1]
+    # kv row: horizontal on desktop, wraps only in the narrow fallback
+    kv_rule = css.split(".hw-kv {")[1].split("}")[0]
+    assert "flex-wrap: nowrap" in kv_rule
+    assert "margin-top: auto" in kv_rule  # kv pinned to card bottom → equal heights
+    narrow = css.split("@media (max-width: 480px)")[1] if "@media (max-width: 480px)" in css else ""
+    assert "flex-wrap: wrap" in narrow, "narrow-screen kv fallback missing"
+    # exactly one ring per card: ring lives in the head, not in a second block
+    js = DASHBOARD_JS.read_text()
+    for fn in ("drawCpu", "drawRam", "drawGpu", "drawStorage"):
+        block = js.split(f"function {fn}(")[1].split("\n  }")[0]
+        assert block.count("ringSvg(") == 1, f"{fn}: exactly one ring"
+        assert "hw-head-ring" in block, f"{fn}: ring rides the head row"
+
+
+def test_dashboard_v32_no_duplicate_values():
+    """v3.2 dedup contract in the page source."""
+    src = DASHBOARD_JS.read_text()
+    # removed dupes must not exist at all
+    assert "dash-cpu-load" not in src, "CPU load sub-line must be gone"
+    assert "dash-ram-sub" not in src, "RAM used/total sub must be gone"
+    assert "dash-disk-sub" not in src, "Storage used/total sub must be gone"
+    assert "dash-gpu-vram-cap" not in src, "GPU ring cap (duplicate VRAM text) must be gone"
+    assert "dash-modelvram" not in src, "Model VRAM cell must be gone (merged into VRAM kv)"
+    assert ">Clocks<" not in src and 'class="v">${g.clocks' not in src, "GPU Clocks cell must be gone"
+    assert "utilization</div>" not in src, "GPU utilization sub-label must be gone"
+    # the split cell exists and derives from /api/ps fields
+    assert "dash-cpusplit" in src
+    assert "size_vram" in src and "derived from /api/ps" in src
 
 
 def test_dashboard_v3_frontend():
