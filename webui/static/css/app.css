@@ -281,6 +281,9 @@ label { display: block; font-size: 12px; color: var(--text-dim); margin-bottom: 
 .code-actions .cb-btn:hover {
   color: var(--text); border-color: var(--accent); background: rgba(255, 255, 255, .05);
 }
+/* clipboard feedback states (set briefly by copyCode) */
+.code-actions .cb-btn.cb-ok { color: #7ec98f; border-color: rgba(126, 201, 143, .5); opacity: 1; }
+.code-actions .cb-btn.cb-err { color: #e08a8a; border-color: rgba(224, 138, 138, .5); opacity: 1; }
 .chat-md a { color: var(--accent); text-decoration: underline; }
 .chat-md table { border-collapse: collapse; margin: 8px 0; }
 .chat-md th, .chat-md td { border: 1px solid var(--border-2); padding: 4px 8px; }

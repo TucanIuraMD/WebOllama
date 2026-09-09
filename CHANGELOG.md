@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.5.4 (2026-11)
+
+### Added
+
+- **Chat — third code block action «Копировать» (v1.1).** Every action
+  bar is now `[ Копировать ] [ Сохранить ] [ Ответить ]`, identical above
+  and below each code block. **Копировать** puts the clicked block's code
+  (its `<code>` textContent — no fences, no language tag) on the
+  clipboard via `navigator.clipboard.writeText()` with a legacy
+  `execCommand('copy')` fallback for plain-http contexts; it is
+  client-only (zero fetch/API calls). Visual feedback: the button shows
+  «Скопировано» (green `.cb-ok`) or «Ошибка» (red `.cb-err`) for 1.5 s;
+  clipboard denial, a missing Clipboard API, and execCommand exceptions
+  are all handled without breaking the chat. Button labels were renamed
+  to the Russian UI language (Копировать / Сохранить / Ответить).
+
+### Verified (Chat-wide regression, jsdom — 19 checks in
+`tests/test_chat_code_actions.py` + full suite)
+
+- plain reply text and Markdown render correctly on decorated DOM;
+- inline code never gets action bars (only `<pre>` is decorated);
+- multiple code blocks stay independent (top button of block 1, bottom
+  of block 2, block 3 — each targets its own content);
+- streaming creates no duplicates; all three buttons work after the
+  final render; Stop and the SSE pipeline are untouched;
+- the next send keeps the correct alternating `messages` context (first
+  question, assistant reply with the code, edited composer text);
+- the textarea composer works after «Ответить» (edit → Enter sends);
+  Reply never auto-sends;
+- Copy and Save make zero fetch/API calls; clipboard failure is
+  graceful («Ошибка», chat keeps working, later Copy/Save succeed);
+- DOMPurify XSS protection intact; actions never mutate the code block,
+  the bars, or the transcript (a received reply is never lost by
+  Copy/Save/Reply). No backend/SSE changes, no new polling.
+
 ## 1.5.3 (2026-11)
 
 ### Added

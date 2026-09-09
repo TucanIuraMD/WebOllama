@@ -148,6 +148,48 @@
     }
   }
 
+  /* Copy THIS block's code (textContent of its <code>) to the clipboard:
+   * no fences, no language tag, no server round-trip.
+   * navigator.clipboard exists only in secure contexts — on plain http
+   * (e.g. LAN hosts like Hermes) we fall back to the legacy
+   * execCommand('copy') path. Both failures are non-fatal: the button
+   * shows «Ошибка», the chat keeps working. */
+  function copyCode(pre, btn) {
+    const text = codeTextOf(pre);
+    const done = (ok) => {
+      if (!btn) return;
+      const prev = btn.textContent;
+      btn.textContent = ok ? "Скопировано" : "Ошибка";
+      btn.classList.toggle("cb-ok", !!ok);
+      btn.classList.toggle("cb-err", !ok);
+      setTimeout(() => {
+        btn.textContent = prev;
+        btn.classList.remove("cb-ok", "cb-err");
+      }, 1500);
+    };
+    const legacy = () => {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.setAttribute("readonly", "");
+        ta.style.position = "fixed";
+        ta.style.top = "-1000px";
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand ? document.execCommand("copy") : false;
+        ta.remove();
+        done(!!ok);
+      } catch { done(false); }
+    };
+    try {
+      if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+        navigator.clipboard.writeText(text).then(() => done(true), legacy);
+      } else {
+        legacy();
+      }
+    } catch { legacy(); }
+  }
+
   /* Reply-with-code: put a fenced quote of THIS block into the composer
    * for the user to edit. Never auto-sends (sendOrStop is not invoked);
    * composer content is set via .value → no HTML/script can execute. */
@@ -167,8 +209,9 @@
 
   function barHtml() {
     return '<span class="' + CB.BAR + '">' +
-      '<button type="button" class="cb-btn" data-cb-action="save">Save</button>' +
-      '<button type="button" class="cb-btn" data-cb-action="reply">Reply</button>' +
+      '<button type="button" class="cb-btn" data-cb-action="copy">Копировать</button>' +
+      '<button type="button" class="cb-btn" data-cb-action="save">Сохранить</button>' +
+      '<button type="button" class="cb-btn" data-cb-action="reply">Ответить</button>' +
       "</span>";
   }
 
@@ -193,7 +236,8 @@
           ev.stopPropagation();
           const host = btn.closest("pre");
           if (!host) return;
-          if (btn.dataset.cbAction === "save") downloadCode(host);
+          if (btn.dataset.cbAction === "copy") copyCode(host, btn);
+          else if (btn.dataset.cbAction === "save") downloadCode(host);
           else replyWithCode(host);
         });
       }
@@ -375,6 +419,6 @@
   window.Pages.chat = {
     render, sendMessage: () => sendMessage(document.getElementById("chat-input")), stopGeneration, clearChat,
     // code block actions (exposed for tests / debugging)
-    decorateCodeActions, fileNameFor, langOf, codeTextOf,
+    decorateCodeActions, fileNameFor, langOf, codeTextOf, copyCode,
   };
 })();

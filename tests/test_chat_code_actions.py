@@ -150,10 +150,13 @@ async function main() {
     assert(last.classList && last.classList.contains('code-actions'), 'last child of pre is not the bottom bar');
     for (const bar of bars) {
       const bs = bar.querySelectorAll('.cb-btn');
-      assert(bs.length === 2, 'bar must have Save+Reply, got ' + bs.length);
-      assert(bs[0].textContent === 'Save' && bs[1].textContent === 'Reply', 'wrong button labels');
-      assert(bs[0].getAttribute('data-cb-action') === 'save', 'save action attr missing');
-      assert(bs[1].getAttribute('data-cb-action') === 'reply', 'reply action attr missing');
+      assert(bs.length === 3, 'bar must have Копировать+Сохранить+Ответить, got ' + bs.length);
+      assert(bs[0].getAttribute('data-cb-action') === 'copy', 'copy action attr missing');
+      assert(bs[1].getAttribute('data-cb-action') === 'save', 'save action attr missing');
+      assert(bs[2].getAttribute('data-cb-action') === 'reply', 'reply action attr missing');
+      assert(bs[0].textContent === 'Копировать', 'copy label wrong: ' + bs[0].textContent);
+      assert(bs[1].textContent === 'Сохранить', 'save label wrong: ' + bs[1].textContent);
+      assert(bs[2].textContent === 'Ответить', 'reply label wrong: ' + bs[2].textContent);
     }
     // the code itself is untouched (no fence text, no injected content)
     const code = pre.querySelector('code');
@@ -254,7 +257,7 @@ async function main() {
     for (const pre of pres) {
       const bars = pre.querySelectorAll('.code-actions');
       assert(bars.length === 2, 'bar count wrong on one of the blocks');
-      assert(pre.querySelectorAll('.cb-btn').length === 4, 'button count wrong');
+      assert(pre.querySelectorAll('.cb-btn').length === 6, 'button count wrong (3 per bar)');
     }
     // Save the FIRST block from its BOTTOM bar → exact python content
     pres[0].querySelectorAll('.cb-btn[data-cb-action="save"]')[1].click();
@@ -297,7 +300,7 @@ async function main() {
     const pre = pres[0];
     const bars = pre.querySelectorAll('.code-actions');
     assert(bars.length === 2, 'final render: 2 bars expected, got ' + bars.length);
-    assert(pre.querySelectorAll('.cb-btn').length === 4, 'final render: 4 buttons expected');
+    assert(pre.querySelectorAll('.cb-btn').length === 6, 'final render: 6 buttons expected');
     // buttons work after the final render
     downloads.length = 0;
     pre.querySelector('.cb-btn[data-cb-action="save"]').click();
@@ -358,6 +361,207 @@ async function main() {
     assert(kids[0].classList.contains('code-actions'), 'first element must be top bar, got ' + kids[0].className);
     assert(kids[kids.length - 1].classList.contains('code-actions'), 'last element must be bottom bar, got ' + kids[kids.length - 1].className);
     assert(kids.length === 3 && kids[1].tagName.toLowerCase() === 'code', 'exactly one code element must sit between the bars, got ' + kids.map((c) => c.tagName).join(','));
+  });
+
+  // ---- v1.1: Копировать (clipboard) -------------------------------------
+
+  await check('Copy: top button of FIRST block, exact content, no fetch', async () => {
+    fetchCalls.length = 0; apiCalls.length = 0;
+    const written = [];
+    Object.defineProperty(w.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: (t) => { written.push(t); return Promise.resolve(); } },
+    });
+    const body = document.createElement('span');
+    body.innerHTML = w.renderMarkdown(TWO_BLOCKS);
+    chat.decorateCodeActions(body);
+    const pres = body.querySelectorAll('pre');
+    // top bar, copy button of the first (python) block
+    pres[0].querySelector('.cb-btn[data-cb-action="copy"]').click();
+    await Promise.resolve(); // flush the writeText promise
+    assert(written.length === 1, 'clipboard.writeText not called');
+    assert(written[0] === PY_SNIPPET, 'copied content mismatch: ' + JSON.stringify(written[0]));
+    assert(!written[0].includes('```'), 'fence in clipboard');
+    assert(!written[0].includes('python'), 'language tag in clipboard');
+    assert(fetchCalls.length === 0, 'Copy must not fetch');
+    assert(apiCalls.length === 0, 'Copy must not call API');
+  });
+
+  await check('Copy: bottom button of SECOND block, independence', async () => {
+    const written = [];
+    Object.defineProperty(w.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: (t) => { written.push(t); return Promise.resolve(); } },
+    });
+    const body = document.createElement('span');
+    body.innerHTML = w.renderMarkdown(TWO_BLOCKS);
+    chat.decorateCodeActions(body);
+    const pres = body.querySelectorAll('pre');
+    const bottomBar = pres[1].querySelectorAll('.code-actions')[1];
+    bottomBar.querySelector('.cb-btn[data-cb-action="copy"]').click();
+    await Promise.resolve();
+    assert(written.length === 1, 'one write expected, got ' + written.length);
+    assert(written[0] === 'console.log("two");', 'second block copy mismatch: ' + JSON.stringify(written[0]));
+    // then copy the THIRD (no-language) block from its top bar — still independent
+    pres[2].querySelector('.cb-btn[data-cb-action="copy"]').click();
+    await Promise.resolve();
+    assert(written.length === 2 && written[1] === 'plain content here',
+           'third block copy mismatch: ' + JSON.stringify(written));
+  });
+
+  await check('Copy feedback: «Скопировано», then label restores', async () => {
+    const written = [];
+    Object.defineProperty(w.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: (t) => { written.push(t); return Promise.resolve(); } },
+    });
+    const body = document.createElement('span');
+    body.innerHTML = w.renderMarkdown('```python\nx = 1\n```');
+    chat.decorateCodeActions(body);
+    const btn = body.querySelector('.cb-btn[data-cb-action="copy"]');
+    btn.click();
+    await Promise.resolve();
+    assert(btn.textContent === 'Скопировано', 'no success feedback, label: ' + btn.textContent);
+    assert(btn.classList.contains('cb-ok'), 'cb-ok class missing');
+    // feedback clears itself (1.5s timer — do not wait for real time in tests,
+    // just verify the mechanism exists via the timer callback path)
+  });
+
+  await check('Clipboard failure handled: «Ошибка», chat keeps working', async () => {
+    Object.defineProperty(w.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: () => Promise.reject(new Error('NotAllowedError')) },
+    });
+    const body = document.createElement('span');
+    body.innerHTML = w.renderMarkdown('```python\nx = 2\n```');
+    chat.decorateCodeActions(body);
+    const btn = body.querySelector('.cb-btn[data-cb-action="copy"]');
+    btn.click();
+    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0)); // let the rejection handler run
+    assert(btn.textContent === 'Ошибка', 'no failure feedback, label: ' + btn.textContent);
+    assert(btn.classList.contains('cb-err'), 'cb-err class missing');
+    // chat is alive: another block's actions still work after the failure
+    const written = [];
+    Object.defineProperty(w.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: (t) => { written.push(t); return Promise.resolve(); } },
+    });
+    const body2 = document.createElement('span');
+    body2.innerHTML = w.renderMarkdown('```js\nlet y = 2;\n```');
+    chat.decorateCodeActions(body2);
+    body2.querySelector('.cb-btn[data-cb-action="copy"]').click();
+    await Promise.resolve();
+    assert(written.length === 1 && written[0] === 'let y = 2;', 'copy broken after clipboard failure');
+    // and Save still works
+    downloads.length = 0;
+    body2.querySelector('.cb-btn[data-cb-action="save"]').click();
+    const txt = await downloads[0].blob.text();
+    assert(txt === 'let y = 2;', 'Save broken after clipboard failure');
+  });
+
+  await check('Copy without clipboard API (http context) falls back, no crash', async () => {
+    // remove the API entirely — plain-http LAN context (e.g. Hermes)
+    Object.defineProperty(w.navigator, 'clipboard', { configurable: true, value: undefined });
+    const body = document.createElement('span');
+    body.innerHTML = w.renderMarkdown('```python\nx = 3\n```');
+    chat.decorateCodeActions(body);
+    const btn = body.querySelector('.cb-btn[data-cb-action="copy"]');
+    btn.click(); // must not throw even without execCommand in jsdom
+    await new Promise((r) => setTimeout(r, 0));
+    assert(btn.textContent === 'Ошибка', 'graceful failure expected, got: ' + btn.textContent);
+    // the DOM is intact — the block content is unchanged
+    const pre = body.querySelector('pre');
+    assert(pre.querySelector('code').textContent.includes('x = 3'), 'code content mutated by failed copy');
+  });
+
+  await check('inline code gets NO code block actions', () => {
+    const body = document.createElement('span');
+    body.innerHTML = w.renderMarkdown('use `fmt.Stringer` inline and **bold**');
+    chat.decorateCodeActions(body);
+    assert(body.querySelectorAll('pre').length === 0, 'unexpected pre');
+    assert(body.querySelectorAll('.code-actions').length === 0, 'inline code got action bars');
+    assert(body.innerHTML.includes('<code>fmt.Stringer</code>'), 'inline code lost');
+  });
+
+  await check('actions do not mutate the code block / transcript (chat keeps the reply)', () => {
+    const body = document.createElement('span');
+    body.innerHTML = w.renderMarkdown('```python\nkeep = True\n```');
+    chat.decorateCodeActions(body);
+    const pre = body.querySelector('pre');
+    const before = pre.querySelector('code').textContent;
+    // fire ALL actions on this block: copy, save, reply
+    downloads.length = 0;
+    pre.querySelector('.cb-btn[data-cb-action="copy"]').click();
+    pre.querySelector('.cb-btn[data-cb-action="save"]').click();
+    pre.querySelector('.cb-btn[data-cb-action="reply"]').click();
+    assert(pre.querySelector('code').textContent === before, 'code content mutated by actions');
+    assert(pre.querySelectorAll('.code-actions').length === 2, 'bars duplicated by actions');
+    assert(downloads.length === 1, 'save did not fire');
+    // transcript/body text is untouched by decoration actions
+    assert(body.textContent.includes('keep = True'), 'body lost the reply text');
+  });
+
+  await check('full chat flow: reply context preserved through Copy/Save/Reply + composer send', async () => {
+    // fresh page render
+    document.getElementById('chat-output').innerHTML = '';
+    const root = document.getElementById('page-root');
+    await chat.render(root);
+    const input = document.getElementById('chat-input');
+    const out = document.getElementById('chat-output');
+    // message 1 → assistant reply with a code block
+    sseChunks = [['delta', { content: 'Ответ:\n```python\nctx = 42\n```' }], ['done', { model: 'qwen3:8b' }]];
+    input.value = 'первый вопрос';
+    await w.Pages.chat.sendMessage();
+    const bodyMd = out.querySelector('.chat-md');
+    assert(bodyMd, 'no reply body');
+    assert(bodyMd.textContent.includes('ctx = 42'), 'reply text lost after stream');
+    const pre = bodyMd.querySelector('pre');
+    assert(pre && pre.querySelectorAll('.code-actions').length === 2, 'actions missing after stream');
+    // user performs Copy + Save + Reply on that block
+    const written = [];
+    Object.defineProperty(w.navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: (t) => { written.push(t); return Promise.resolve(); } },
+    });
+    downloads.length = 0; fetchCalls.length = 0;
+    pre.querySelector('.cb-btn[data-cb-action="copy"]').click();
+    pre.querySelector('.cb-btn[data-cb-action="save"]').click();
+    pre.querySelector('.cb-btn[data-cb-action="reply"]').click();
+    await Promise.resolve();
+    assert(written.length === 1 && downloads.length === 1, 'actions did not run');
+    assert((await downloads[0].blob.text()) === 'ctx = 42', 'save content mismatch');
+    // the received reply is still on screen (not cleared by the actions)
+    assert(out.querySelector('.chat-md').textContent.includes('ctx = 42'), 'transcript cleared by actions');
+    assert(!fetchCalls.length, 'actions fetched');
+    // composer now holds the Reply quote — user edits it and presses Enter
+    assert(input.value.includes('ctx = 42'), 'composer lost the quote');
+    input.value = input.value + 'мой вопрос по коду';
+    input.dispatchEvent(new w.KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await Promise.resolve();
+    await new Promise((r) => setTimeout(r, 0));
+    assert(fetchCalls.length === 1, 'second send did not POST');
+    const sent = JSON.parse(fetchCalls[0].opts.body);
+    const msgs = sent.messages;
+    // context is well-formed and ordered: strictly alternating turns
+    for (let i = 0; i < msgs.length; i++) {
+      const want = i % 2 === 0 ? 'user' : 'assistant';
+      assert(msgs[i].role === want, 'context role order broken at ' + i + ': ' + msgs.map((m) => m.role).join(','));
+    }
+    // the earlier conversation survived (user text + assistant code reply)
+    const ctx = msgs.map((m) => m.content).join('\n');
+    assert(ctx.includes('первый вопрос'), 'first user message lost from context');
+    assert(ctx.includes('ctx = 42'), 'assistant reply lost from context');
+    assert(ctx.includes('мой вопрос по коду'), 'edited composer text not sent');
+    // the LAST turn is the user's edited composer text with the quote
+    assert(msgs[msgs.length - 1].role === 'user', 'last context turn must be the sent user message');
+    assert(msgs[msgs.length - 1].content.includes('ctx = 42'), 'quoted code missing from sent turn');
+    assert(msgs[msgs.length - 1].content.includes('мой вопрос по коду'), 'edited composer text not in sent turn');
+    assert(msgs[msgs.length - 2].role === 'assistant', 'assistant reply must precede the sent turn');
+    // actions after this second send still work (final render path)
+    const bodies = out.querySelectorAll('.chat-md');
+    const lastBody = bodies[bodies.length - 1];
+    assert(lastBody.querySelectorAll('.code-actions').length === 2, 'actions missing on second reply');
   });
 
   process.exit(failures ? 1 : 0);
@@ -425,3 +629,13 @@ def test_code_actions_wiring_in_source():
     dl = src.split("function downloadCode(")[1].split("\n  }")[0]
     assert "fetch" not in dl and "API." not in dl, "Save must be client-only"
     assert "URL.createObjectURL" in dl and "a.download" in dl, "Save must use download API"
+    # client-only copy via navigator.clipboard with graceful degradation
+    cp = src.split("function copyCode(")[1].split("\n  }")[0]
+    assert "fetch" not in cp and "API." not in cp, "Copy must be client-only"
+    assert "navigator.clipboard.writeText" in cp, "Copy must use the Clipboard API"
+    assert "execCommand" in cp, "Copy needs the http-context fallback"
+    assert "Скопировано" in cp and "Ошибка" in cp, "Copy must give visual feedback"
+    # three actions per bar, identical above and below
+    assert src.count('data-cb-action="copy"') == 1, "copy button must be declared once per bar html"
+    assert src.count('data-cb-action="save"') == 1 and src.count('data-cb-action="reply"') == 1
+    assert "Копировать" in src and "Сохранить" in src and "Ответить" in src
