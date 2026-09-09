@@ -1,5 +1,83 @@
 # Dashboard v3 — visual redesign + REAL hardware metrics (2026-11)
 
+## v3.1 UI polish: иконки + композиция карточек
+
+### 1. Иконки — emoji → единый набор inline SVG
+
+Emoji (🖥️ 🧠 🎮 💾 📦 ▶ ⚙ 💬 🤖 🌙 🔌) заменены монохромными
+outline-иконками. В проекте не было icon-библиотеки (только точечные
+SVG-ring'и и text-глифы сортировки в Models), поэтому выбран **inline SVG**
+без внешних зависимостей: один визуальный язык — `viewBox 0 0 22 22`,
+`stroke="currentColor"`, `stroke-width 1.6`, round caps, 17×17px,
+`fill="none"` (контурный стиль, цвет наследуется от текста — иконки
+автоматически принимают `good/bad/warn`-цвета плиток).
+
+Источник — функция `iconSvg(name)` в `dashboard.js` (экспортируется для
+тестов), глифы:
+
+| name | глиф | где используется |
+|---|---|---|
+| `cpu` | chip (корпус + ножки + кристалл) | карточка CPU |
+| `ram` | memory module (планка + чипы) | карточка RAM |
+| `gpu` | graphics card (плата + кронштейн + вентилятор) | карточка GPU, empty-state, nav |
+| `storage` | disk (корпус + бли + активность) | карточка Storage |
+| `ollama` | server (стойка + LED) | плитка Ollama, empty-state offline, Chat-кнопка/ссылка |
+| `models` | layers (стопка) | плитка Models, nav, empty «No models loaded» |
+| `running` | play (круг + треугольник) | плитка Running, nav |
+| `jobs` | activity (пульс) | плитка Jobs, nav |
+| `power` | bolt (молния) | плитка Electricity |
+
+Размещение: заголовки карточек (`.hw-icon`), подписи верхних плиток
+(`.tile-icon`), быстрые ссылки (`.dash-nav .btn-sm`), empty-состояния
+(`.empty .icon`). **Emoji полностью убраны из Dashboard** — закреплено
+регрессионным тестом (проверка юникод-диапазонов 1F000–1FAFF,
+2600–27BF, 2B00–2BFF по всей разметке страницы + uniform-размер/цвет
+каждого `<svg class="icon">`).
+
+### 2. Композиция hw-карточек (RAM / GPU / Storage — единая структура)
+
+Фиксированный вертикальный порядок внутри карточки:
+
+1. **head** — иконка + имя;
+2. **`hw-main`** — основной показатель СЛЕВА (`.hw-pct-block`: большое
+   значение + подпись), круговой индикатор СПРАВА (`.hw-ring-wrap`:
+   SVG-ring + подпись-подпись, у GPU — VRAM-cap);
+3. **`hw-bar`** — progress bar НА ВСЮ ширину карточки (вне flex-строки);
+4. **`hw-kv`** — USED / FREE / TOTAL в ОДНУ горизонтальную строку
+   (`display:flex; nowrap`, три равные ячейки; у GPU — Power /
+   Temperature / Model VRAM / Fan Target / Fan PWM / Clocks — тоже
+   одной строкой).
+
+CSS: `.hw-kv` переведён с `grid 3 колонки` на `flex` c равными ячейками;
+responsive fallback `@media (max-width: 480px)` — ячейки переносятся
+(`flex-wrap`, `flex-basis 40%`). `.hw-icon`/`.tile-icon` получили
+`inline-flex`-выравнивание SVG.
+
+**CPU сохраняет логически соответствующую структуру**: utilization слева
++ ring справа (у CPU ring дублирует util — основной показатель), bar —
+опциональный (load/threads, только когда load известен; у CPU нет
+«Used/Free/Total» — вместо этого Cores / Threads / Frequency одной
+строкой, fake-строка хранения не подставляется).
+
+Не менялось: backend, API, telemetry, realtime/WS, polling, значения,
+single-source architecture, Electricity, NVMe — только разметка и CSS.
+
+### Регрессионные тесты (v3.1)
+
+Добавлены 2 сценария в `tests/test_dashboard_v3_frontend.py` (итого 20):
+
+- **«icons: no emoji anywhere, monochrome inline SVG markup instead»** —
+  отсутствие emoji во всей разметке, наличие SVG-иконок в 4 hw-карточках,
+  ровно 5 tile-иконок, единый размер (17px) и `currentColor`-обводка
+  каждого инстанса, наличие всех 9 глифов через `dash.iconSvg`;
+- **«hw-card composition: main left, ring right, full-width bar, one kv
+  row»** — для RAM/GPU/Storage порядок `hw-main(pct+ring) → hw-bar →
+  hw-kv`, набор kv-ключей (Used/Free/Total; Power/Temperature), ровно 3
+  ячейки у RAM; CPU — своя логичная структура (Cores/Threads/Frequency,
+  без fake-storage-строки).
+
+---
+
 ## Задача
 
 Визуально переработать Dashboard (тёмная тема сохранена) до «реально
@@ -124,7 +202,7 @@
 
 ## Тесты
 
-- `tests/test_dashboard_v3_frontend.py` (новый, jsdom): 18 сценариев —
+- `tests/test_dashboard_v3_frontend.py` (новый, jsdom): 20 сценариев —
   полный рендер, zero-value semantics (0%/0 B/0 W/0 GB и 100%), таблица
   Running (колонки, derived split, actions), partial snapshot,
   GPU-unavailable, offline, API-error, Electricity states, WS live update,

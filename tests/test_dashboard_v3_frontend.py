@@ -342,6 +342,84 @@ await run('navigation links: Models/Running/Jobs/Chat/Agents/GPU present and obv
   assert(pageRoot.innerHTML.includes('id="dash-running-tile"'), 'running tile not a link');
 });
 
+await run('icons: no emoji anywhere, monochrome inline SVG markup instead', async () => {
+  const pageRoot = document.getElementById('page-root');
+  const all = pageRoot.innerHTML + (html('dash-running') || '');
+  // 1) NO emoji-style icons on a professional monitoring dashboard
+  const emoji = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2B00}-\u{2BFF}]/u;
+  assert(!emoji.test(all), 'emoji found in dashboard markup: ' + (all.match(emoji) || []).join(''));
+  // 2) SVG icon markup present for every hardware card and top tile
+  for (const id of ['dash-hw-cpu', 'dash-hw-ram', 'dash-hw-gpu', 'dash-hw-storage']) {
+    const card = html(id) || '';
+    assert(card.includes('<svg class="icon"'), `SVG icon missing in ${id}`);
+    assert(card.includes('hw-card-head'), `card head missing in ${id}`);
+  }
+  assert(pageRoot.innerHTML.includes('class="tile-icon"'), 'tile icons missing');
+  const tileIcons = (pageRoot.innerHTML.match(/class="tile-icon"/g) || []).length;
+  assert(tileIcons === 5, 'expected 5 top-tile icons (Ollama/Models/Running/Jobs/Electricity), got ' + tileIcons);
+  // 3) one consistent icon language: uniform size + currentColor stroke
+  assert(all.includes('viewBox="0 0 22 22"'), 'icon viewBox inconsistent');
+  assert(!all.includes('width="16"') || !all.includes('emoji'), 'icon size drift');
+  const iconTags = all.match(/<svg class="icon"[^>]*>/g) || [];
+  assert(iconTags.length >= 9, 'expected >=9 icon instances, got ' + iconTags.length);
+  for (const tag of iconTags) {
+    assert(tag.includes('width="17"') && tag.includes('height="17"'), 'icon size not 17px: ' + tag);
+    assert(tag.includes('stroke="currentColor"'), 'icon not monochrome (currentColor): ' + tag);
+    assert(tag.includes('fill="none"'), 'icon not outline style: ' + tag);
+  }
+  // 4) specific glyphs per slot
+  const ic = dash.iconSvg;
+  assert(ic('cpu').includes('<rect'), 'CPU icon = chip');
+  assert(ic('ram').includes('<rect'), 'RAM icon = memory module');
+  assert(ic('gpu').includes('circle'), 'GPU icon = graphics card');
+  assert(ic('storage').includes('circle'), 'Storage icon = disk');
+  assert(ic('ollama').includes('rect'), 'Ollama icon = server');
+  assert(ic('models').includes('path'), 'Models icon = layers');
+  assert(ic('running').includes('circle'), 'Running icon = play/process');
+  assert(ic('jobs').includes('path'), 'Jobs icon = activity');
+  assert(ic('power').includes('path'), 'Electricity icon = power/bolt');
+});
+
+await run('hw-card composition: main left, ring right, full-width bar, one kv row', async () => {
+  // uniform structure for RAM / GPU / Storage: hw-main (pct-block + ring-wrap)
+  // → hw-bar → hw-kv with exactly 3 cells (USED/FREE/TOTAL semantics)
+  for (const [id, kvKeys] of [
+    ['dash-hw-ram', ['Used', 'Free', 'Total']],
+    ['dash-hw-gpu', ['Power', 'Temperature']],
+    ['dash-hw-storage', ['Used', 'Free', 'Total']],
+  ]) {
+    const card = html(id) || '';
+    const mainIdx = card.indexOf('<div class="hw-main">');
+    const ringIdx = card.indexOf('hw-ring-wrap');
+    const barIdx = card.indexOf('hw-bar');
+    const kvIdx = card.indexOf('<div class="hw-kv">');
+    assert(mainIdx !== -1, `hw-main missing in ${id}`);
+    assert(card.includes('class="hw-pct-block"') && card.includes('class="hw-pct"'), `main metric (left) missing in ${id}`);
+    assert(ringIdx !== -1 && mainIdx < ringIdx, `ring indicator (right) missing in ${id}`);
+    assert(barIdx !== -1 && mainIdx < barIdx && barIdx < kvIdx, `${id}: bar must sit between main and kv (full-width below)`);
+    const mainChunk = card.slice(mainIdx, ringIdx + 40);
+    assert(mainChunk.includes('hw-pct') && mainChunk.includes('hw-ring-wrap'), `${id}: main block must pair metric + ring`);
+    // kv block runs to the closing `</div>` that precedes the NEXT section
+    // (hw-foot / hw-mini-gpus) or the template end — extract by slicing to
+    // the next top-level marker instead of a fragile lazy regex (cells
+    // contain nested </div></div> pairs)
+    const nextSection = ['hw-foot', 'hw-mini-gpus'].map((m) => card.indexOf(m, kvIdx)).filter((i) => i > 0);
+    const kvEnd = nextSection.length ? Math.min(...nextSection) : card.length;
+    const kv = card.slice(kvIdx, kvEnd);
+    assert(kv.includes('class="k"'), `kv row missing in ${id}`);
+    for (const k of kvKeys) assert(kv.includes(`>${k}</div>`), `${id}: kv key ${k} missing`);
+  }
+  // RAM kv is ONE horizontal row: exactly 3 label cells
+  const ramKv = html('dash-hw-ram') || '';
+  const ramKvStart = ramKv.indexOf('<div class="hw-kv">');
+  const ramKvBlock = ramKv.slice(ramKvStart, ramKv.indexOf('</div>', ramKv.indexOf('dash-ram-total')));
+  assert((ramKvBlock.match(/<div class="k">/g) || []).length === 3, 'RAM kv must have exactly 3 cells');
+  // CPU keeps its own logical structure (no fake Used/Free/Total)
+  const cpuCard = html('dash-hw-cpu') || '';
+  assert(cpuCard.includes('hw-pct') && cpuCard.includes('Cores') && cpuCard.includes('Threads'), 'CPU card structure intact');
+  assert(!cpuCard.includes('>Free<'), 'CPU card must not fake storage-style kv');
+});
+
 await run('PROCESSOR render: good data, unavailable, garbage — no NaN/undefined', async () => {
   await dash.renderProcessor({ available: true, host: 'h', cpu: { utilization: 42, load: [3.2, 2.8] }, gpu_available: true,
     gpus: [], ollama: { online: true, running_models: [{ name: 'qwen3:8b', size_vram: 6.8e9 }] } });

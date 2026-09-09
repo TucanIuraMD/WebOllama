@@ -105,6 +105,50 @@
     return `<div class="hw-bar"><div style="width:${p.toFixed(1)}%;background:${color || pctColor(p)}"></div></div>`;
   }
 
+  /* ---- icons: monochrome inline SVG (no emoji on a monitoring dashboard) ----
+   * One visual language: 1.6-stroke outline, round caps, 17px box, colored
+   * by CSS `currentColor`. Pure markup — no icon font, no external library,
+   * no extra request. Rendered inside .hw-icon / .tile-icon spans. */
+  function iconSvg(name) {
+    const paths = {
+      // chip: square package + pins + inner die
+      cpu: `<rect x="5.5" y="5.5" width="11" height="11" rx="1.5"/>
+            <rect x="9" y="9" width="4" height="4" rx="0.8"/>
+            <path d="M9 2.5v3M13 2.5v3M9 16.5v3M13 16.5v3M2.5 9h3M2.5 13h3M16.5 9h3M16.5 13h3"/>`,
+      // memory module: stick + chips + notch row
+      ram: `<rect x="2.5" y="4.5" width="17" height="9.5" rx="1"/>
+            <path d="M2.5 14h17v3.5h-17z"/>
+            <path d="M6 7.5v3M9.5 7.5v3M13 7.5v3M16.5 7.5v3"/>`,
+      // graphics card: board + bracket + fan
+      gpu: `<rect x="2.5" y="5.5" width="15" height="9" rx="1.5"/>
+            <path d="M2.5 17.5h3M17.5 8h2v5h-2"/>
+            <circle cx="8.5" cy="10" r="3"/>
+            <path d="M13.5 8.5l2-1.5"/>`,
+      // disk: drive body + platter + activity lines
+      storage: `<rect x="2.5" y="5.5" width="17" height="11" rx="2"/>
+            <circle cx="8" cy="11" r="2.2"/>
+            <path d="M13 9h4M13 13h4"/>`,
+      // server: rack units with status LEDs
+      ollama: `<rect x="2.5" y="3.5" width="17" height="6" rx="1.5"/>
+            <rect x="2.5" y="12.5" width="17" height="6" rx="1.5"/>
+            <path d="M5.5 6.5h.01M8 6.5h.01M5.5 15.5h.01M8 15.5h.01"/>`,
+      // layers: stacked models
+      models: `<path d="M11 2.5 20 7l-9 4.5L2 7z"/>
+            <path d="M4.2 9.8 2 11l9 4.5 9-4.5-2.2-1.2"/>
+            <path d="M4.2 13.8 2 15l9 4.5 9-4.5-2.2-1.2"/>`,
+      // play: loaded / running
+      running: `<circle cx="11" cy="11" r="8.5"/>
+            <path d="M9 7.5l6 3.5-6 3.5z"/>`,
+      // activity: jobs / task pulse
+      jobs: `<path d="M2.5 12h4l2.5-6.5 4 11 2.5-4.5h4"/>`,
+      // bolt: power / electricity
+      power: `<path d="M12.5 2.5 5 12.5h5l-1.5 8L17 10h-5z"/>`,
+    };
+    const d = paths[name];
+    if (!d) return "";
+    return `<svg class="icon" viewBox="0 0 22 22" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
+  }
+
   async function render(el) {
     Charts.destroyAll("dash");
     charts = null;
@@ -157,47 +201,47 @@
 
       <div class="dash-top-grid">
         <div class="metric-tile ${offline ? "bad" : "good"}" id="dash-ollama-tile">
-          <div class="metric-label">Ollama</div>
+          <div class="metric-label"><span class="tile-icon">${iconSvg("ollama")}</span>Ollama</div>
           <div class="metric-value" style="font-size:16px" id="dash-ollama-state">${offline && snap ? "● OLLAMA OFFLINE" : snap ? "● ONLINE" : "⏳ Loading…"}</div>
           <div class="metric-sub" id="dash-ollama-sub">${snap && snap.ollama ? `v${esc(snap.ollama.version || "—")} · ${esc(snap.ollama.endpoint || "")}` : "waiting for data…"}</div>
         </div>
         <a class="metric-tile dash-link" href="#models" id="dash-models-tile">
-          <div class="metric-label">Models</div>
+          <div class="metric-label"><span class="tile-icon">${iconSvg("models")}</span>Models</div>
           <div class="metric-value" id="dash-models-count">—</div>
           <div class="metric-sub" id="dash-models-sub">installed · open Models →</div>
         </a>
         <a class="metric-tile dash-link" href="#running" id="dash-running-tile">
-          <div class="metric-label">Running</div>
+          <div class="metric-label"><span class="tile-icon">${iconSvg("running")}</span>Running</div>
           <div class="metric-value" id="dash-running-count">—</div>
           <div class="metric-sub">loaded · open Running →</div>
         </a>
         <a class="metric-tile dash-link" href="#jobs" id="dash-jobs-tile">
-          <div class="metric-label">Jobs</div>
+          <div class="metric-label"><span class="tile-icon">${iconSvg("jobs")}</span>Jobs</div>
           <div class="metric-value" id="dash-jobs-count">—</div>
           <div class="metric-sub" id="dash-jobs-sub">recent · open Jobs →</div>
         </a>
         <a class="metric-tile dash-link" href="#electricity" id="dash-electricity-tile">
-          <div class="metric-label">Electricity</div>
+          <div class="metric-label"><span class="tile-icon">${iconSvg("power")}</span>Electricity</div>
           <div class="metric-value" style="font-size:14px" id="dash-electricity-value">—</div>
           <div class="metric-sub" id="dash-electricity-sub">power & cost · open Electricity →</div>
         </a>
       </div>
 
       <div class="dash-nav">
-        <a class="btn-sm" href="#models">📦 Models</a>
-        <a class="btn-sm" href="#running">▶ Running</a>
-        <a class="btn-sm" href="#jobs">⚙ Jobs</a>
-        <a class="btn-sm" href="#chat">💬 Chat</a>
-        <a class="btn-sm" href="#agents">🤖 Agents</a>
-        <a class="btn-sm" href="#gpu">🎮 GPU</a>
+        <a class="btn-sm" href="#models">${iconSvg("models")} Models</a>
+        <a class="btn-sm" href="#running">${iconSvg("running")} Running</a>
+        <a class="btn-sm" href="#jobs">${iconSvg("jobs")} Jobs</a>
+        <a class="btn-sm" href="#chat">${iconSvg("ollama")} Chat</a>
+        <a class="btn-sm" href="#agents">${iconSvg("jobs")} Agents</a>
+        <a class="btn-sm" href="#gpu">${iconSvg("gpu")} GPU</a>
       </div>
 
       <div class="dash-section-title">Hardware</div>
       <div class="hw-grid">
-        ${hwShell("🖥️", "CPU", "dash-hw-cpu")}
-        ${hwShell("🧠", "RAM", "dash-hw-ram")}
-        ${hwShell("🎮", "GPU", "dash-hw-gpu")}
-        ${hwShell("💾", "Storage", "dash-hw-storage")}
+        ${hwShell(iconSvg("cpu"), "CPU", "dash-hw-cpu")}
+        ${hwShell(iconSvg("ram"), "RAM", "dash-hw-ram")}
+        ${hwShell(iconSvg("gpu"), "GPU", "dash-hw-gpu")}
+        ${hwShell(iconSvg("storage"), "Storage", "dash-hw-storage")}
       </div>
 
       <div class="dash-section-title" style="margin-top:18px">Running Models <span class="ps-src">(ollama ps)</span>
@@ -289,7 +333,7 @@
     const loadRatio = load[0] != null && threads ? Math.min(100, (load[0] / threads) * 100) : null;
     const freq = cpu.frequency && cpu.frequency.current != null ? fmtMhz(cpu.frequency.current) : null;
     el.innerHTML = `
-      <div class="hw-card-head"><span class="hw-icon">🖥️</span><span class="hw-name">CPU</span></div>
+      <div class="hw-card-head"><span class="hw-icon">${iconSvg("cpu")}</span><span class="hw-name">CPU</span></div>
       <div class="hw-model-line" title="${esc(cpu.model || "")}">${cpu.model ? esc(cpu.model) : ""}</div>
       <div class="hw-main">
         <div class="hw-pct-block">
@@ -312,7 +356,7 @@
     if (!el) return;
     const pct = fmtPct(ram.percent);                       // 0 → "0%", 100 → "100%"
     el.innerHTML = `
-      <div class="hw-card-head"><span class="hw-icon">🧠</span><span class="hw-name">RAM</span></div>
+      <div class="hw-card-head"><span class="hw-icon">${iconSvg("ram")}</span><span class="hw-name">RAM</span></div>
       <div class="hw-main">
         <div class="hw-pct-block">
           <div class="hw-pct">${orDash(pct)}</div>
@@ -338,8 +382,8 @@
     if (!gpu.available) {
       // explicit unavailable — GPU-less hosts are NORMAL, not an error
       el.innerHTML = `
-        <div class="hw-card-head"><span class="hw-icon">🎮</span><span class="hw-name">GPU</span></div>
-        <div class="hw-loading" style="padding:6px 0 2px">🎮 ${esc(gpu.reason || "No NVIDIA GPU detected on this host")}</div>
+        <div class="hw-card-head"><span class="hw-icon">${iconSvg("gpu")}</span><span class="hw-name">GPU</span></div>
+        <div class="hw-loading" style="padding:6px 0 2px">${iconSvg("gpu")} ${esc(gpu.reason || "No NVIDIA GPU detected on this host")}</div>
         <div class="hw-foot">CPU-only Ollama works fine — this card fills in automatically when an NVIDIA GPU is present.</div>`;
       return;
     }
@@ -347,7 +391,7 @@
     const g = gpus[0] || null;
     if (!g) {
       el.innerHTML = `
-        <div class="hw-card-head"><span class="hw-icon">🎮</span><span class="hw-name">GPU</span></div>
+        <div class="hw-card-head"><span class="hw-icon">${iconSvg("gpu")}</span><span class="hw-name">GPU</span></div>
         <div class="hw-loading">GPU available, no devices reported — check the GPU page for details.</div>`;
       return;
     }
@@ -362,7 +406,7 @@
       return `<div class="hw-mini-gpu">#${esc(String(x.index))} ${esc(x.name || "GPU")} — ${orDash(fmtPct(x.utilization))} · ${orDash(fmtGb(x.vram_used))} / ${orDash(fmtGb(x.vram_total))} (${vp}) · ${orDash(fmtTempC(x.temperature))}</div>`;
     }).join("");
     el.innerHTML = `
-      <div class="hw-card-head"><span class="hw-icon">🎮</span><span class="hw-name">GPU</span></div>
+      <div class="hw-card-head"><span class="hw-icon">${iconSvg("gpu")}</span><span class="hw-name">GPU</span></div>
       <div class="hw-model-line" title="${esc(g.name || "")}">${esc(g.name || "GPU")}</div>
       <div class="hw-main">
         <div class="hw-pct-block">
@@ -393,13 +437,13 @@
     if (!el) return;
     if (!disk || !disk.total) {
       el.innerHTML = `
-        <div class="hw-card-head"><span class="hw-icon">💾</span><span class="hw-name">Storage</span></div>
-        <div class="hw-loading">💾 Storage data unavailable</div>`;
+        <div class="hw-card-head"><span class="hw-icon">${iconSvg("storage")}</span><span class="hw-name">Storage</span></div>
+        <div class="hw-loading">${iconSvg("storage")} Storage data unavailable</div>`;
       return;
     }
     const pct = fmtPct(disk.percent);
     el.innerHTML = `
-      <div class="hw-card-head"><span class="hw-icon">💾</span><span class="hw-name">Storage</span></div>
+      <div class="hw-card-head"><span class="hw-icon">${iconSvg("storage")}</span><span class="hw-name">Storage</span></div>
       <div class="hw-main">
         <div class="hw-pct-block">
           <div class="hw-pct">${orDash(pct)}</div>
@@ -439,7 +483,7 @@
   }
   function runningTableHtml(rows) {
     if (!rows.length) {
-      return `<div class="empty text-dim">🌙 No models loaded
+      return `<div class="empty text-dim">${iconSvg("models")} No models loaded
         <div class="text-faint" style="margin-top:4px">Run one from <a href="#models">Models</a>.</div></div>`;
     }
     return `<div class="ps-table-wrap"><table class="ps-table">
@@ -461,7 +505,7 @@
             <td class="num text-dim" title="time until unload (expires_at)">${orDash(fmtDur(remainingSec(m.expires_at)))}</td>
             <td><span class="badge running-badge">● running</span></td>
             <td><div class="ps-actions">
-              <button class="btn-sm" data-action="run-chat" data-model="${esc(m.name)}" title="Chat with this model">💬 Chat</button>
+              <button class="btn-sm" data-action="run-chat" data-model="${esc(m.name)}" title="Chat with this model">${iconSvg("ollama")} Chat</button>
               <button class="btn-sm btn-danger" data-action="run-stop" data-model="${esc(m.name)}" title="Unload from memory">⏹ Stop</button>
             </div></td>
           </tr>`;
@@ -478,7 +522,7 @@
     if (!runEl) return;
     const ollama = snap.ollama || {};
     if (ollama.online === false) {
-      runEl.innerHTML = `<div class="empty text-dim">🔌 Ollama offline — running models unknown
+      runEl.innerHTML = `<div class="empty text-dim">${iconSvg("ollama")} Ollama offline — running models unknown
         <div class="text-faint" style="margin-top:4px">Start Ollama or check the endpoint; the table updates automatically.</div></div>`;
       return;
     }
@@ -755,6 +799,6 @@
     fmtPct, fmtWatts, fmtTempC, fmtGb, fmtMhz, fmtDur, ringSvg,
     renderProcessor, startProcessorPolling, stopProcessorPolling,
     markProcStaleIfDue, touchProcOk, refreshProcessor,
-    loadElectricitySummary, renderElecTile,
+    loadElectricitySummary, renderElecTile, iconSvg,
   };
 })();

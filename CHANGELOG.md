@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.5.1 (2026-11)
+
+### Changed
+
+- **Dashboard v3.1 — UI polish: professional SVG icons + hardware card
+  composition.** All emoji on the Dashboard (hardware card heads, top
+  tiles, quick-nav links, empty states) are replaced with a single set of
+  monochrome inline-SVG outline icons (17px, `stroke="currentColor"`,
+  1.6 stroke, round caps — `iconSvg()` in `dashboard.js`, no icon font,
+  no external library, no extra request): CPU = chip, RAM = memory
+  module, GPU = graphics card, Storage = disk, Ollama = server, Models =
+  layers, Running = play, Jobs = activity, Electricity = power bolt. The
+  hardware cards (RAM/GPU/Storage) now share one fixed composition:
+  main metric LEFT, circular indicator RIGHT, full-width progress bar
+  below, then USED/FREE/TOTAL in ONE horizontal row (flex with equal
+  cells; wraps to stacked pairs under 480px). CPU keeps its logically
+  matching structure (utilization + ring, optional load bar,
+  Cores/Threads/Frequency row — no faked storage-style values). UI-only:
+  no backend/API/telemetry/realtime/polling/value changes, Electricity
+  untouched, still no NVMe. Tests: 2 new regression scenarios in
+  `tests/test_dashboard_v3_frontend.py` (no emoji anywhere + uniform SVG
+  icon markup incl. per-slot glyphs; horizontal card structure incl.
+  responsive kv fallback) — 20 cases total. Docs: `docs/DASHBOARD-V3.md`
+  §"v3.1 UI polish".
+
 ## 1.5.0 (2026-11)
 
 ### Changed
