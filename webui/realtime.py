@@ -68,24 +68,49 @@ class RealtimeService:
             except Exception as exc:
                 logger.debug("gpu energy sampler stop failed: %s", exc)
 
+    # Ollama status must NEVER stall the realtime loop: a hung llama-server
+    # with a 600s read timeout would freeze WebSocket snapshots (Dashboard
+    # shows the last good snapshot — observed as stale 75%/55°C/218.99W
+    # while nvidia-smi already showed 0%/42°C/40W). GPU collection starts
+    # immediately and in parallel; Ollama gets a hard SLA instead.
+    _OLLAMA_SLA = 3.0  # seconds — hard cap for the cached-status refresh
+
     async def _ollama_status(self) -> dict:
         now = time.time()
         if now - self._ollama_cache_ts >= self._ollama_ttl:
-            self._ollama_cache = await self.client.status()
-            self._ollama_cache_ts = now
+            try:
+                self._ollama_cache = await asyncio.wait_for(
+                    self.client.status(), timeout=self._OLLAMA_SLA
+                )
+                self._ollama_cache_ts = now
+            except (asyncio.TimeoutError, Exception) as exc:
+                # Keep the previous cache if present, else report offline.
+                if not self._ollama_cache:
+                    self._ollama_cache = {
+                        "online": False,
+                        "version": None,
+                        "endpoint": "",
+                        "models_count": 0,
+                        "running_count": 0,
+                        "running": [],
+                        "vram_used": 0,
+                        "error": f"status timeout/error: {exc}",
+                    }
+                # Do NOT bump _ollama_cache_ts: retry on the next tick.
         return self._ollama_cache
 
     async def build_snapshot(self, persist: bool = False) -> dict:
-        ollama = await self._ollama_status()
+        # GPU first — it is the realtime-critical path and must not wait
+        # behind Ollama HTTP calls.
         gpu_task = asyncio.create_task(self.gpu.sample())
         sys_task = asyncio.create_task(self.system.sample())
+        ollama_task = asyncio.create_task(self._ollama_status())
         jobs_list = await self.jobs.list(limit=30)
-        gpu, sysdata = await asyncio.gather(gpu_task, sys_task)
+        gpu, sysdata, ollama = await asyncio.gather(gpu_task, sys_task, ollama_task)
 
-        # merge Ollama VRAM attribution into GPU view
+        # merge Ollama VRAM attribution into GPU view (cheap, pure-Python)
         if ollama.get("online"):
-            vram = await self.gpu.ollama_vram(ollama.get("running", []))
-            gpu["ollama_vram"] = vram
+            gpu["ollama_vram"] = await self.gpu.ollama_vram(ollama.get("running", []))
         else:
             gpu["ollama_vram"] = {"total_vram": 0, "per_model": {}}
 
@@ -120,7 +145,10 @@ class RealtimeService:
         self.last_snapshot = snapshot
 
         if persist:
-            ts = time.time()
+            # Record the snapshot's ACTUAL metric read time, never the persist
+            # moment: if collection was served from cache, history must still
+            # describe the real age of the numbers, not the write time.
+            ts = float(gpu.get("ts") or gpu.get("collected_at") or time.time())
             try:
                 await self.db.insert_metric(ts, "gpu", {
                     "available": gpu.get("available"),
@@ -160,7 +188,7 @@ class RealtimeService:
             try:
                 await self.build_snapshot(persist=True)
                 await self.db.prune_old_metrics()
-                # Electricity v1: record host power telemetry on the same cadence
+                # Electricity v1: record power telemetry on the same cadence
                 # (its own service; failure must not break GPU/system history)
                 try:
                     from .electricity import get_electricity_service

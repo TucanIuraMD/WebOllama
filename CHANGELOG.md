@@ -1,5 +1,56 @@
 # Changelog
 
+## 1.5.0 (2026-11)
+
+### Changed
+
+- **Dashboard v3 — visual redesign + REAL hardware metrics**: the Dashboard
+  is rebuilt around (1) a top nav row of 5 tiles (Ollama / Models / Running /
+  Jobs / Electricity) + quick links, (2) four hardware cards — CPU (real
+  load, model name from `/proc/cpuinfo`, cores/threads/load/frequency), RAM
+  (used/free/total + %), GPU (the SAME single-source realtime snapshot:
+  utilization ring, VRAM used/total ring, temperature, power, Model-VRAM
+  (Ollama) as a SEPARATE labelled value, multi-GPU mini-rows never
+  collapsed), Storage (disk aggregate from the same SystemCollector
+  snapshot; NO NVMe/SMART/temperature) — and (3) a Running Models table in
+  the style of `ollama ps` (Model / ID / Size / Processor / VRAM / Context
+  / Duration / Status / Actions with Chat+Stop reusing the Running page
+  handlers). Zero-value contract enforced everywhere: `0%`/`0 B`/`0 W`/
+  `0 GB` render as the values they are, `100%` as `100%`; missing data
+  renders as `—`, never as a fabricated zero. Ollama offline: the running
+  table explicitly reports "Ollama offline — running models unknown" (no
+  fake rows) and the Running count shows `—` (unknown ≠ 0). Loading /
+  API-error / partial-snapshot / stale-PROCESSOR states preserved and
+  extended; seq-guards prevent stale API answers from overwriting newer
+  state. No new samplers, no new polling: the 3 s PROCESSOR poll remains
+  the ONLY interval (stopped on every re-render), live updates ride the
+  existing WebSocket snapshot, the Electricity tile keeps its single fetch
+  per render + 60 s WS-cadence throttle.
+- **Backend (same single-source architecture)**: `SystemCollector` now
+  reports `cpu.model` (one-time `/proc/cpuinfo` read, validated, no
+  subprocess); `GPUCollector.sample()` is single-flight (concurrent
+  callers share ONE collection; the cache is only ever replaced by a
+  completed one) and stamps explicit `ts` / `collected_at` / per-GPU `ts`;
+  `RealtimeService` gives the Ollama status refresh a hard 3 s SLA so a
+  hung llama-server can no longer freeze WebSocket snapshots (GPU/system
+  start immediately, in parallel) and history records the snapshot's
+  actual metric read time; `/api/status` serves the cached snapshot only
+  while fresh (`REFRESH_INTERVAL + 1 s`) and otherwise builds live, so a
+  stalled realtime loop cannot serve stale state forever.
+- **Tests**: new `tests/test_dashboard_v3_frontend.py` — 18 jsdom scenarios
+  (full render, zero-value semantics incl. 100%, ollama-ps table columns /
+  derived split / actions, partial snapshot preservation, GPU-unavailable,
+  offline, API error, Electricity states, WS live update, exactly-one-timer,
+  overlapping-render race, snapshot cache, stale PROCESSOR after 7 s,
+  Electricity 60 s throttle + force refresh, nav links, responsive markup)
+  plus a source-level polling-discipline test; new
+  `tests/test_gpu_stale_regression.py` (single-flight collection,
+  timestamp semantics, hung-Ollama SLA, offline-not-crash, history ts,
+  stale-cache rejection at `/api/status`). Removed
+  `tests/test_dashboard_frontend.py` (v2-layout flows, incompatible with
+  the v3 markup); its still-valid scenarios were ported to the v3 file.
+  Docs: `docs/DASHBOARD-V3.md`.
+
 ## 1.4.3 (2026-09-08)
 
 ### Changed

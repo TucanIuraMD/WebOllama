@@ -13,12 +13,14 @@ Real screenshots go in [`docs/images/`](docs/images/) and are referenced here. *
 ## Features
 
 ### Dashboard
+- **v3 layout**: 5 nav tiles (Ollama / Models / Running / Jobs / Electricity) + quick links, four hardware cards (CPU / RAM / GPU / Storage) and a Running Models table styled after `ollama ps`
 - Real-time GPU: name, utilization %, VRAM (used/total/%), temperature, power, fan control, clocks, PCIe
 - Ollama: ONLINE/OFFLINE indicator, version, model count, loaded models
 - Running models with VRAM + CPU/GPU split (from `/api/ps` size vs size_vram)
 - CPU %, load average
-- GPU VRAM (NVML) and Model VRAM (Ollama) as separate values — one shared realtime snapshot feeds the GPU block, PROCESSOR block and topbar, so numbers never diverge
-- Explicit loading / error / offline / empty states per block; quick navigation to Models · Running · Jobs · Chat · Agents · GPU
+- Zero-value semantics: 0% / 0 B / 0 W render as the values they are; missing data renders as `—`, never a fabricated zero; Ollama offline reports "unknown", not an empty table
+- GPU VRAM (NVML) and Model VRAM (Ollama) as separate values — one shared realtime snapshot feeds the GPU card, PROCESSOR block and topbar, so numbers never diverge
+- Explicit loading / error / offline / empty / stale states per block; quick navigation to Models · Running · Jobs · Chat · Agents · GPU
 - **History charts**: GPU util, VRAM, temperature, power, fan target, fan PWM, CPU, RAM, network, disk (1m/5m/15m/1h)
 
 ### Model Manager

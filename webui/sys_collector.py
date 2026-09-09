@@ -2,12 +2,50 @@
 import asyncio
 import logging
 import os
+import re
 import time
 from typing import Optional
 
 import psutil
 
 logger = logging.getLogger(__name__)
+
+# A plausible CPU model name: at least one letter AND one digit, ≥3 chars,
+# restricted to name-like characters — a bare number ("158", ARM "model")
+# or a serial is NOT a readable model name.
+_CPU_MODEL_RE = re.compile(r"^(?=.*[A-Za-z])(?=.*\d)[A-Za-z0-9()\[\].,@+\- ]{3,}$")
+
+
+def _cpu_model() -> Optional[str]:
+    """CPU model name — /proc/cpuinfo on Linux, platform fallback elsewhere.
+
+    Part of the SAME SystemCollector sample (no extra collector, no
+    subprocess, no additional polling): the realtime snapshot already
+    carries it to the Dashboard CPU card. Returns None when the name is
+    not determinable — the UI then simply omits the line (never a guess).
+    """
+    try:
+        with open("/proc/cpuinfo", "r") as f:
+            for line in f:
+                if ":" not in line:
+                    continue
+                key, value = line.split(":", 1)
+                key = key.strip().lower()
+                value = value.strip()
+                if key in ("model name", "model") and value:
+                    # "model" (ARM/older) may hold a raw number ("158") —
+                    # only trust values that actually look like a name.
+                    if key == "model name" or _CPU_MODEL_RE.search(value):
+                        return value
+    except OSError:
+        pass
+    try:
+        import platform
+
+        raw = platform.processor() or ""
+        return raw if _CPU_MODEL_RE.search(raw) else None
+    except Exception:  # pragma: no cover - defensive
+        return None
 
 
 class SystemCollector:
@@ -17,6 +55,9 @@ class SystemCollector:
         self._last: dict = {}
         self._last_net: Optional[tuple] = None  # (ts, dict[iface] -> (bytes_sent, bytes_recv))
         self._boot_time = psutil.boot_time()
+        # CPU model never changes at runtime — read it once per collector
+        # (plain file read, not a subprocess; no repeated per-sample cost).
+        self._cpu_model = _cpu_model()
 
     async def sample(self) -> dict:
         async with self._lock:
@@ -35,6 +76,7 @@ class SystemCollector:
             pass
         cpu = {
             "percent": cpu_percent,
+            "model": self._cpu_model,
             "load_1": load[0] if load else 0,
             "load_5": load[1] if load else 0,
             "load_15": load[2] if load else 0,

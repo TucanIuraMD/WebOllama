@@ -56,10 +56,10 @@ class GPUCollector:
         self.sysinfo_url = sysinfo_url.rstrip("/")
         self._smi_path: Optional[str] = None
         self._nvml_available: Optional[bool] = None
-        self._lock = asyncio.Lock()
-        self._last = 0.0
-        self._cache: dict = {"available": False, "reason": "collector not run yet"}
-        self._cache_ttl = 0.9  # seconds
+        self._lock = asyncio.Lock()  # single-flight: concurrent sample() calls share ONE collection
+        self._last = 0.0             # monotonic ts of the last COMPLETED collection
+        self._cache: Optional[dict] = None
+        self._cache_ttl = 0.9  # seconds — NVML protection only, never a staleness excuse
         self._last_warn = 0.0
 
     # ---- logging --------------------------------------------------------------
@@ -99,64 +99,106 @@ class GPUCollector:
 
     # ---- sampling -------------------------------------------------------------
     async def sample(self) -> dict:
-        now = time.monotonic()
-        if now - self._last < self._cache_ttl:
+        """Return the current GPU snapshot.
+
+        Single-flight + TTL: while a collection is in flight every caller
+        awaits the SAME collection (no duplicate NVML / nvidia-smi /
+        journalctl churn, no out-of-order cache overwrites). The cache is
+        only ever replaced by a COMPLETED collection and carries explicit
+        timestamps ("ts" = metric read time, "collected_at" = snapshot
+        assembly time) so consumers can detect staleness honestly.
+        """
+        if self._cache is not None and time.monotonic() - self._last < self._cache_ttl:
             return self._cache
-        self._last = now
-        try:
-            data = await self._collect()
-        except GPUNotAvailable as exc:
-            self._warn_throttled("GPU unavailable: %s", exc)
-            data = {"available": False, "reason": str(exc), "gpus": [], "processes": [], "ts": time.time()}
-        except Exception as exc:  # pragma: no cover - defensive
-            self._warn_throttled("GPU collection error: %s", exc)
-            data = {"available": False, "reason": f"collector error: {exc}", "gpus": [], "processes": [], "ts": time.time()}
-        self._cache = data
-        return data
+        async with self._lock:
+            # double-checked: another coroutine may have refreshed while we waited
+            if self._cache is not None and time.monotonic() - self._last < self._cache_ttl:
+                return self._cache
+            try:
+                data = await self._collect()
+            except GPUNotAvailable as exc:
+                self._warn_throttled("GPU unavailable: %s", exc)
+                data = {"available": False, "reason": str(exc), "gpus": [], "processes": [], "ts": time.time()}
+            except Exception as exc:  # pragma: no cover - defensive
+                self._warn_throttled("GPU collection error: %s", exc)
+                data = {"available": False, "reason": f"collector error: {exc}", "gpus": [], "processes": [], "ts": time.time()}
+            now = time.time()
+            data["ts"] = data.get("ts") or now  # metric read time (set by the source)
+            data["collected_at"] = now          # snapshot assembly time (wall clock)
+            for g in data.get("gpus", []):
+                g.setdefault("ts", data["ts"])  # per-GPU read time for staleness checks
+            self._cache = data
+            self._last = time.monotonic()       # cache age counted from COMPLETION
+            return data
 
     async def _collect(self) -> dict:
         data: Optional[dict] = None
-        # 1) local NVML — authoritative when running on the GPU host
-        if self._probe_nvml():
-            try:
-                data = await self._collect_nvml()
-            except GPUNotAvailable as exc:
-                self._warn_throttled("NVML unavailable (%s); trying nvidia-smi", exc)
-            except Exception as exc:  # pragma: no cover
-                self._warn_throttled("NVML collection failed, falling back to nvidia-smi: %s", exc)
-
-        # 2) local nvidia-smi
-        if data is None:
-            smi = self._find_nvidia_smi()
-            if smi:
+        # Fan state is read CONCURRENTLY with GPU metrics: a slow journalctl
+        # (subprocess timeout 5s) must never delay or stale the NVML numbers.
+        # Fan freshness is tracked independently via fan_ts / fan_collected_at.
+        fan_task = asyncio.create_task(self._read_fan_state())
+        try:
+            # 1) local NVML — authoritative when running on the GPU host
+            if self._probe_nvml():
                 try:
-                    data = await self._collect_smi(smi)
+                    data = await self._collect_nvml()
                 except GPUNotAvailable as exc:
-                    self._warn_throttled("nvidia-smi failed: %s", exc)
+                    self._warn_throttled("NVML unavailable (%s); trying nvidia-smi", exc)
+                except Exception as exc:  # pragma: no cover
+                    self._warn_throttled("NVML collection failed, falling back to nvidia-smi: %s", exc)
 
-        # 3) optional remote sysinfo endpoint (only if explicitly configured)
-        if data is None and self.sysinfo_url:
-            try:
-                data = await self._collect_remote()
-            except Exception as exc:
-                self._warn_throttled("Remote GPU collector unavailable: %s", exc)
+            # 2) local nvidia-smi
+            if data is None:
+                smi = self._find_nvidia_smi()
+                if smi:
+                    try:
+                        data = await self._collect_smi(smi)
+                    except GPUNotAvailable as exc:
+                        self._warn_throttled("nvidia-smi failed: %s", exc)
+
+            # 3) optional remote sysinfo endpoint (only if explicitly configured)
+            if data is None and self.sysinfo_url:
+                try:
+                    data = await self._collect_remote()
+                except Exception as exc:
+                    self._warn_throttled("Remote GPU collector unavailable: %s", exc)
+        finally:
+            fan = await fan_task  # always reap the fan task, even on failure
 
         if data is None:
             raise GPUNotAvailable("no NVIDIA GPU detected (nvidia-smi / NVML not found)")
 
-        await self._attach_fan_state(data)
+        self._attach_fan_state(data, fan)
         return data
 
-    async def _attach_fan_state(self, data: dict) -> None:
+    async def _read_fan_state(self) -> dict:
+        """Read v100-fan state; a fan failure must never break the GPU snapshot."""
+        from .v100_fan import get_v100_fan_reader
+
+        try:
+            return await get_v100_fan_reader().read_state()
+        except Exception as exc:  # pragma: no cover - defensive
+            return {
+                "available": False,
+                "reason": f"fan reader error: {exc}",
+                "temperature": None,
+                "fan_target": None,
+                "fan_pwm": None,
+                "source": None,
+                "ts": None,
+            }
+
+    def _attach_fan_state(self, data: dict, fan: dict) -> None:
         """Attach v100-fan control state to V100 GPUs.
 
         The Tesla V100 fan is governed by `v100-fan.service` (ESP32 controller),
         NOT by NVML fan speed. We display fan_target / fan_pwm from that system
         and never surface the NVML fan value as V100 fan control.
-        """
-        from .v100_fan import get_v100_fan_reader
 
-        fan = await get_v100_fan_reader().read_state()
+        `fan` is the pre-read state (collected concurrently with the GPU
+        metrics — see _collect), so fan freshness is independent of NVML.
+        """
+        data["fan_collected_at"] = fan.get("ts")
         gpus = data.get("gpus", [])
         for g in gpus:
             is_v100 = "V100" in (g.get("name") or "").upper() or len(gpus) == 1
@@ -166,6 +208,7 @@ class GPUCollector:
                 g["fan_source"] = fan.get("source")
                 g["fan_available"] = fan.get("available", False)
                 g["fan_reason"] = fan.get("reason")
+                g["fan_ts"] = fan.get("ts")
             else:
                 g["fan_target"] = None
                 g["fan_pwm"] = None

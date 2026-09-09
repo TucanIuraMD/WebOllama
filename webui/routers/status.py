@@ -4,7 +4,7 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from ..config import HISTORY_RETENTION
+from ..config import HISTORY_RETENTION, REFRESH_INTERVAL
 from ..db import Database
 from ..deps import require_user
 from ..gpu_collector import get_gpu_collector
@@ -19,8 +19,12 @@ router = APIRouter(prefix="/api", tags=["status"])
 @router.get("/status")
 async def status(user: dict = Depends(require_user)):
     rt = get_realtime_service()
-    if rt.last_snapshot:
-        return rt.last_snapshot
+    snap = rt.last_snapshot
+    # Serve the cached realtime snapshot only while it is fresh: a stalled
+    # realtime loop must never leave /api/status serving an old GPU/ollama
+    # state forever — fall through to a live build instead.
+    if snap and (time.time() - snap.get("ts", 0)) <= REFRESH_INTERVAL + 1.0:
+        return snap
     return await rt.build_snapshot()
 
 

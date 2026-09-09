@@ -1,28 +1,109 @@
-/* Dashboard v2 — single daily-driver overview after Models v2 / Running v2 /
- * PROCESSOR / GPU sync / Chat v2-v3.
+/* Dashboard v3 — visual redesign + REAL hardware metrics.
  *
- * Data sources (unchanged architecture — ONE realtime snapshot is the truth):
- *   - WS snapshot (snap): gpu + cpu/ram + ollama (online, counts, running)
- *     — same object the topbar and PROCESSOR (via /api/system/processor)
- *     consume, so GPU/VRAM numbers cannot diverge between blocks;
- *   - /api/system/processor — polled every 3s ONLY while the Dashboard is
- *     the active page (existing PROCESSOR contract, timer killed on page
- *     switch and beforeunload);
- *   - /api/history/{gpu,system} — history charts (no live polling).
+ * Layout (mirrors the agreed mock-up, desktop-first, stacks on mobile):
+ *   TOP NAV CARDS   [ Ollama ][ Models ][ Running ][ Jobs ][ Electricity ]
+ *   HARDWARE        [ CPU ][ RAM ][ GPU ][ STORAGE ]
+ *   RUNNING MODELS  ollama-ps-style table (Model/ID/Size/Processor/VRAM/
+ *                   Context/Duration/Status/Actions)
+ *   PROCESSOR       existing block (3s page-scoped poll, unchanged)
+ *   HISTORY         existing charts (unchanged)
  *
- * No new backend endpoints. No duplicate GPU telemetry: the GPU block, the
- * GPU tile and the PROCESSOR block all render from the shared snapshot
- * payload, and model VRAM (ollama running size_vram) is always shown
- * separately from GPU VRAM.
+ * Data sources — SINGLE-SOURCE TELEMETRY, unchanged architecture:
+ *   CPU / RAM / Storage -> the shared realtime snapshot (SystemCollector /
+ *      psutil inside RealtimeService.build_snapshot). No second collector,
+ *      no df polling, no subprocess per card.
+ *   GPU (util/temp/power/VRAM/driver/cuda) -> the same snapshot's gpu object
+ *      (the ONE GPUCollector snapshot used by topbar, GPU page, PROCESSOR).
+ *      GPU VRAM (NVML) is rendered strictly separately from model VRAM
+ *      (ollama size_vram).
+ *   Ollama running -> snap.ollama.running (OllamaClient -> /api/ps, the data
+ *      behind `ollama ps`). Processor split is the EXISTING honest derivation
+ *      from size vs size_vram and is labelled as derived, never as telemetry.
+ *   Electricity -> existing /api/electricity/gpu-energy, fetched once per
+ *      render + throttled WS-cadence refresh (v1.3 contract, unchanged).
  *
- * States per block: loading / available / empty / offline / stale.
- * An API error NEVER renders as "no data".
+ * Live updates ride the EXISTING websocket snapshot — the only timer on this
+ * page remains the PROCESSOR poll. An API error never renders as "no data".
+ *
+ * ZERO-VALUE SEMANTICS: 0 is a VALUE, not "unavailable". CPU 0% renders as
+ * "0%", RAM/GPU utilization 0% as "0%", 100% as "100%", VRAM 0 as
+ * "0 GB / total", power 0 as "0 W". Only null/undefined/NaN render as "—".
  */
 (function () {
   let charts = null;
   let procTimer = null;
   let procSeq = 0;      // race guard: only the latest processor response wins
   let lastProcOk = 0;   // timestamp of the last successful processor poll
+
+  /* ---- zero-safe formatters (v3 contract: zero is a value) ---- */
+  function fmtPct(v) {
+    if (v === null || v === undefined || v === "") return null;
+    const n = Number(v);
+    if (!Number.isFinite(n)) return null;
+    return Math.round(n) + "%";
+  }
+  function fmtWatts(v) {
+    if (v === null || v === undefined) return null;
+    const n = Number(v);
+    if (!Number.isFinite(n)) return null;
+    return n.toFixed(1).replace(/\.0$/, "") + " W";
+  }
+  function fmtTempC(v) {
+    if (v === null || v === undefined) return null;
+    const n = Number(v);
+    if (!Number.isFinite(n)) return null;
+    return Math.round(n) + "°C";
+  }
+  function fmtGb(v) {
+    if (v === null || v === undefined) return null;
+    const n = Number(v);
+    if (!Number.isFinite(n)) return null;
+    return (n / 1e9).toFixed(1).replace(/\.0$/, "") + " GB";
+  }
+  function fmtMhz(v) {
+    if (v === null || v === undefined) return null;
+    const n = Number(v);
+    if (!Number.isFinite(n) || n <= 0) return null;
+    return (n / 1000).toFixed(2).replace(/\.?0+$/, "") + " GHz";
+  }
+  function fmtDur(sec) {
+    if (sec === null || sec === undefined || !Number.isFinite(Number(sec))) return null;
+    sec = Math.max(0, Math.floor(sec));
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    if (h) return `${h}h ${m}m`;
+    if (m) return `${m}m ${s}s`;
+    return `${s}s`;
+  }
+  function remainingSec(iso) {
+    if (!iso) return null;
+    const t = Date.parse(iso);
+    if (Number.isNaN(t)) return null;
+    return Math.max(0, (t - Date.now()) / 1000);
+  }
+  function pctColor(p) {
+    const n = Number(p);
+    if (!Number.isFinite(n)) return "var(--accent)";
+    if (n >= 90) return "var(--red)";
+    if (n >= 60) return "var(--yellow)";
+    return "var(--green)";
+  }
+  function orDash(v) { return v === null ? "—" : v; }
+
+  /* ---- progress ring / bar (SVG keeps the DOM harness-friendly) ---- */
+  function ringSvg(pct, label) {
+    const p = Math.max(0, Math.min(100, Number(pct) || 0));
+    const R = 26, C = 2 * Math.PI * R;
+    const filled = (p / 100) * C;
+    return `<svg class="hw-ring" viewBox="0 0 64 64" width="64" height="64" aria-hidden="true">
+      <circle class="ring-bg" cx="32" cy="32" r="${R}"></circle>
+      <circle class="ring-fg" cx="32" cy="32" r="${R}" style="stroke:${pctColor(p)}" stroke-dasharray="${filled.toFixed(2)} ${(C - filled).toFixed(2)}"></circle>
+      <text class="hw-ring-text" x="32" y="36" text-anchor="middle">${label}</text>
+    </svg>`;
+  }
+  function barHtml(pct, color) {
+    const p = Math.max(0, Math.min(100, Number(pct) || 0));
+    return `<div class="hw-bar"><div style="width:${p.toFixed(1)}%;background:${color || pctColor(p)}"></div></div>`;
+  }
 
   async function render(el) {
     Charts.destroyAll("dash");
@@ -61,21 +142,20 @@
     loadElectricitySummary(); // ONE existing-API fetch per render; NO new timer
   }
 
+  /* ---- page shell ---- */
+  function hwShell(icon, title, id) {
+    return `<div class="hw-card" id="${id}">
+      <div class="hw-card-head"><span class="hw-icon">${icon}</span><span class="hw-name">${title}</span></div>
+      <div class="hw-loading">⏳ Loading…</div>
+    </div>`;
+  }
+
   function buildPage(snap, loadError) {
     const offline = !snap || !(snap.ollama && snap.ollama.online);
     return `
       ${loadError ? `<div class="alert error" id="dash-alert">⚠ Dashboard data unavailable — ${esc(loadError)}. <a href="#dashboard">Retry</a> or check the backend.</div>` : ""}
 
-      <div class="dash-nav">
-        <a class="btn-sm" href="#models">📦 Models</a>
-        <a class="btn-sm" href="#running">▶ Running</a>
-        <a class="btn-sm" href="#jobs">⚙ Jobs</a>
-        <a class="btn-sm" href="#chat">💬 Chat</a>
-        <a class="btn-sm" href="#agents">🤖 Agents</a>
-        <a class="btn-sm" href="#gpu">🎮 GPU</a>
-      </div>
-
-      <div class="grid grid-4">
+      <div class="dash-top-grid">
         <div class="metric-tile ${offline ? "bad" : "good"}" id="dash-ollama-tile">
           <div class="metric-label">Ollama</div>
           <div class="metric-value" style="font-size:16px" id="dash-ollama-state">${offline && snap ? "● OLLAMA OFFLINE" : snap ? "● ONLINE" : "⏳ Loading…"}</div>
@@ -91,33 +171,44 @@
           <div class="metric-value" id="dash-running-count">—</div>
           <div class="metric-sub">loaded · open Running →</div>
         </a>
+        <a class="metric-tile dash-link" href="#jobs" id="dash-jobs-tile">
+          <div class="metric-label">Jobs</div>
+          <div class="metric-value" id="dash-jobs-count">—</div>
+          <div class="metric-sub" id="dash-jobs-sub">recent · open Jobs →</div>
+        </a>
         <a class="metric-tile dash-link" href="#electricity" id="dash-electricity-tile">
           <div class="metric-label">Electricity</div>
           <div class="metric-value" style="font-size:14px" id="dash-electricity-value">—</div>
           <div class="metric-sub" id="dash-electricity-sub">power & cost · open Electricity →</div>
         </a>
-        <div class="metric-tile" id="dash-cpu-tile">
-          <div class="metric-label">CPU</div>
-          <div class="metric-value" id="dash-cpu-value">—</div>
-          <div class="metric-sub" id="dash-cpu-sub">waiting for data…</div>
-        </div>
       </div>
 
-      <div class="card" style="margin-top:12px">
+      <div class="dash-nav">
+        <a class="btn-sm" href="#models">📦 Models</a>
+        <a class="btn-sm" href="#running">▶ Running</a>
+        <a class="btn-sm" href="#jobs">⚙ Jobs</a>
+        <a class="btn-sm" href="#chat">💬 Chat</a>
+        <a class="btn-sm" href="#agents">🤖 Agents</a>
+        <a class="btn-sm" href="#gpu">🎮 GPU</a>
+      </div>
+
+      <div class="dash-section-title">Hardware</div>
+      <div class="hw-grid">
+        ${hwShell("🖥️", "CPU", "dash-hw-cpu")}
+        ${hwShell("🧠", "RAM", "dash-hw-ram")}
+        ${hwShell("🎮", "GPU", "dash-hw-gpu")}
+        ${hwShell("💾", "Storage", "dash-hw-storage")}
+      </div>
+
+      <div class="dash-section-title" style="margin-top:18px">Running Models <span class="ps-src">(ollama ps)</span>
+        <span class="right" style="margin-left:auto"><a class="btn-sm" href="#running">open Running →</a></span></div>
+      <div class="card" style="padding:6px 12px 10px">
+        <div id="dash-running"><div class="empty text-dim">⏳ Loading…</div></div>
+      </div>
+
+      <div class="card" style="margin-top:4px">
         <div class="card-title">PROCESSOR <span class="right"><span class="proc-host" id="proc-host"></span><span class="text-faint" id="dash-proc-state"></span></span></div>
         <div id="proc-body" class="proc-unavailable">⏳ Loading processor data…</div>
-      </div>
-
-      <div class="grid grid-2">
-        <div class="card">
-          <div class="card-title">GPU <span id="dash-gpu-title"></span></div>
-          <div id="dash-gpu-body"><div class="empty"><div class="big">⏳</div>Loading GPU data…</div></div>
-        </div>
-
-        <div class="card">
-          <div class="card-title">Running Models <span class="right"><a class="btn-sm" href="#running">open Running →</a></span></div>
-          <div id="dash-running"><div class="empty text-dim">⏳ Loading…</div></div>
-        </div>
       </div>
 
       <div class="card">
@@ -157,113 +248,242 @@
       const oSub = document.getElementById("dash-ollama-sub");
       if (oState) {
         oState.textContent = ollama.online ? "● ONLINE" : "● OLLAMA OFFLINE";
-        oSub.textContent = `v${ollama.version || "—"} · ${ollama.endpoint || ""}`;
+        const oTile = document.getElementById("dash-ollama-tile");
+        if (oTile) oTile.classList.toggle("bad", !ollama.online);
+        if (oSub) oSub.textContent = `v${ollama.version || "—"} · ${ollama.endpoint || ""}`;
       }
       // Models / Running tiles (counts from the same snapshot)
       const mc = document.getElementById("dash-models-count");
       if (mc) mc.textContent = ollama.models_count != null ? String(ollama.models_count) : "—";
       const rc = document.getElementById("dash-running-count");
       if (rc) rc.textContent = ollama.running_count != null ? String(ollama.running_count) : (ollama.online ? "0" : "—");
+      // ollama offline: the count is UNKNOWN, not zero — show the honest "—"
+      if (rc && !ollama.online) rc.textContent = "—";
       drawRunning(snap);
     }
+    if (snap.jobs) drawJobsTile(snap.jobs);
+    if (snap.cpu) drawCpu(snap.cpu);
+    if (snap.ram) drawRam(snap.ram);
     if (snap.gpu) drawGpu(snap.gpu);
-    if (snap.cpu) {
-      const cpu = snap.cpu;
-      const cv = document.getElementById("dash-cpu-value");
-      if (cv) cv.textContent = cpu.percent != null ? Number(cpu.percent).toFixed(0) + "%" : "—";
-      const cs = document.getElementById("dash-cpu-sub");
-      if (cs) cs.textContent = cpu.load_1 != null ? `load ${Number(cpu.load_1).toFixed(2)}` : "—";
-    }
+    if (snap.disk) drawStorage(snap.disk);
   }
 
-  /* ONE GPU source: the shared snapshot's gpu object. The PROCESSOR block
-   * (polled) serves the same numbers from the same snapshot — see
-   * test_processor_matches_dashboard_gpu_block on the backend. */
-  function drawGpu(gpu) {
-    const body = document.getElementById("dash-gpu-body");
-    const title = document.getElementById("dash-gpu-title");
-    if (!body) return;
-    const gpus = gpu.gpus || [];
-    const g = gpus[0] || null;
+  /* ---- TOP: Jobs tile (counts only; the workflow lives on Jobs page) ---- */
+  function drawJobsTile(jobs) {
+    const el = document.getElementById("dash-jobs-count");
+    if (!el) return;
+    const list = Array.isArray(jobs) ? jobs : [];
+    const active = list.filter((j) => j && j.status === "running").length;
+    el.textContent = String(active);
+    const sub = document.getElementById("dash-jobs-sub");
+    if (sub) sub.textContent = `${active} active · ${list.length} recent · open Jobs →`;
+  }
 
+  /* ---- HARDWARE: CPU card (SystemCollector via the shared snapshot) ---- */
+  function drawCpu(cpu) {
+    const el = document.getElementById("dash-hw-cpu");
+    if (!el) return;
+    const pct = fmtPct(cpu.percent);                       // 0 → "0%", 100 → "100%"
+    const load = [cpu.load_1, cpu.load_5, cpu.load_15].map((x) => (x == null ? null : Number(x)));
+    const threads = cpu.threads != null ? Number(cpu.threads) : null;
+    const loadRatio = load[0] != null && threads ? Math.min(100, (load[0] / threads) * 100) : null;
+    const freq = cpu.frequency && cpu.frequency.current != null ? fmtMhz(cpu.frequency.current) : null;
+    el.innerHTML = `
+      <div class="hw-card-head"><span class="hw-icon">🖥️</span><span class="hw-name">CPU</span></div>
+      <div class="hw-model-line" title="${esc(cpu.model || "")}">${cpu.model ? esc(cpu.model) : ""}</div>
+      <div class="hw-main">
+        <div class="hw-pct-block">
+          <div class="hw-pct" id="dash-cpu-pct">${orDash(pct)}</div>
+          <div class="hw-pct-sub" id="dash-cpu-load">${load[0] != null ? `load ${load[0].toFixed(2)}${threads ? ` / ${threads} threads` : ""}` : "—"}</div>
+        </div>
+        <div class="hw-ring-wrap">${ringSvg(cpu.percent, orDash(pct))}</div>
+      </div>
+      ${loadRatio != null ? barHtml(loadRatio) : ""}
+      <div class="hw-kv">
+        <div><div class="k">Cores</div><div class="v" id="dash-cpu-cores">${cpu.cores != null ? esc(String(cpu.cores)) : "—"}</div></div>
+        <div><div class="k">Threads</div><div class="v" id="dash-cpu-threads">${threads != null ? esc(String(threads)) : "—"}</div></div>
+        <div><div class="k">Frequency</div><div class="v" id="dash-cpu-freq">${orDash(freq)}</div></div>
+      </div>`;
+  }
+
+  /* ---- HARDWARE: RAM card (SystemCollector / psutil — never model sizes) ---- */
+  function drawRam(ram) {
+    const el = document.getElementById("dash-hw-ram");
+    if (!el) return;
+    const pct = fmtPct(ram.percent);                       // 0 → "0%", 100 → "100%"
+    el.innerHTML = `
+      <div class="hw-card-head"><span class="hw-icon">🧠</span><span class="hw-name">RAM</span></div>
+      <div class="hw-main">
+        <div class="hw-pct-block">
+          <div class="hw-pct">${orDash(pct)}</div>
+          <div class="hw-pct-sub" id="dash-ram-sub">${ram.used != null && ram.total != null ? `${fmtBytes(ram.used)} / ${fmtBytes(ram.total)}` : "—"}</div>
+        </div>
+        <div class="hw-ring-wrap">${ringSvg(ram.percent, orDash(pct))}</div>
+      </div>
+      ${ram.total ? barHtml(ram.percent) : ""}
+      <div class="hw-kv">
+        <div><div class="k">Used</div><div class="v" id="dash-ram-used">${ram.used != null ? fmtBytes(ram.used) : "—"}</div></div>
+        <div><div class="k">Free</div><div class="v" id="dash-ram-free">${ram.free != null ? fmtBytes(ram.free) : "—"}</div></div>
+        <div><div class="k">Total</div><div class="v" id="dash-ram-total">${ram.total != null ? fmtBytes(ram.total) : "—"}</div></div>
+      </div>`;
+  }
+
+  /* ---- HARDWARE: GPU card — the ONE shared snapshot (GPUCollector).
+   * GPU utilization ≠ VRAM: utilization is the big number, VRAM has its
+   * own ring. Model VRAM (Ollama size_vram) is a separate metric and is
+   * always labelled as such. Multi-GPU: extra rows, devices never collapse. */
+  function drawGpu(gpu) {
+    const el = document.getElementById("dash-hw-gpu");
+    if (!el) return;
     if (!gpu.available) {
       // explicit unavailable — GPU-less hosts are NORMAL, not an error
-      title.textContent = "";
-      body.innerHTML = `<div class="empty"><div class="big">🎮</div>${esc(gpu.reason || "No NVIDIA GPU detected on this host")}
-        <div class="text-faint" style="margin-top:6px">CPU-only Ollama works fine — GPU blocks fill in automatically when an NVIDIA GPU is present.</div></div>`;
+      el.innerHTML = `
+        <div class="hw-card-head"><span class="hw-icon">🎮</span><span class="hw-name">GPU</span></div>
+        <div class="hw-loading" style="padding:6px 0 2px">🎮 ${esc(gpu.reason || "No NVIDIA GPU detected on this host")}</div>
+        <div class="hw-foot">CPU-only Ollama works fine — this card fills in automatically when an NVIDIA GPU is present.</div>`;
       return;
     }
+    const gpus = gpu.gpus || [];
+    const g = gpus[0] || null;
     if (!g) {
-      body.innerHTML = `<div class="empty"><div class="big">🎮</div>GPU available, no devices reported<div class="text-faint">Check the GPU page for details.</div></div>`;
+      el.innerHTML = `
+        <div class="hw-card-head"><span class="hw-icon">🎮</span><span class="hw-name">GPU</span></div>
+        <div class="hw-loading">GPU available, no devices reported — check the GPU page for details.</div>`;
       return;
     }
-
-    title.textContent = `· ${g.name || "GPU"}`;
-    const vramPct = g.vram_total ? ((g.vram_used / g.vram_total) * 100).toFixed(0) : null;
+    const utilPct = fmtPct(g.utilization);
+    const vramPct = g.vram_total ? (g.vram_used / g.vram_total) * 100 : null;
     const modelVram = gpu.ollama_vram && gpu.ollama_vram.total_vram;
-    body.innerHTML = `
-      <div style="display:grid;gap:12px">
-        <div>
-          <div class="metric-label" style="margin-bottom:4px">GPU Utilization</div>
-          <div id="dash-gpu-util"></div>
+    const sysLine = [g.cuda_version ? `CUDA ${esc(g.cuda_version)}` : (gpu.cuda_version ? `CUDA ${esc(gpu.cuda_version)}` : null),
+                     (g.driver_version || gpu.driver_version) ? `driver ${esc(g.driver_version || gpu.driver_version)}` : null
+                    ].filter(Boolean).join(" · ");
+    const extra = gpus.slice(1).map((x) => {
+      const vp = x.vram_total ? ((x.vram_used / x.vram_total) * 100).toFixed(0) + "%" : "—";
+      return `<div class="hw-mini-gpu">#${esc(String(x.index))} ${esc(x.name || "GPU")} — ${orDash(fmtPct(x.utilization))} · ${orDash(fmtGb(x.vram_used))} / ${orDash(fmtGb(x.vram_total))} (${vp}) · ${orDash(fmtTempC(x.temperature))}</div>`;
+    }).join("");
+    el.innerHTML = `
+      <div class="hw-card-head"><span class="hw-icon">🎮</span><span class="hw-name">GPU</span></div>
+      <div class="hw-model-line" title="${esc(g.name || "")}">${esc(g.name || "GPU")}</div>
+      <div class="hw-main">
+        <div class="hw-pct-block">
+          <div class="hw-pct" id="dash-gpu-pct">${orDash(utilPct)}</div>
+          <div class="hw-pct-sub">utilization</div>
         </div>
-        <div>
-          <div class="metric-label" style="margin-bottom:4px">GPU VRAM ${fmtBytes(g.vram_used)} / ${fmtBytes(g.vram_total)}${vramPct ? " (" + vramPct + "%)" : ""}</div>
-          <div id="dash-vram-bar"></div>
+        <div class="hw-ring-wrap">${ringSvg(vramPct, vramPct != null ? Math.round(vramPct) + "%" : "—")}
+          <div class="hw-ring-cap" id="dash-gpu-vram-cap">${g.vram_used != null && g.vram_total != null ? `${fmtGb(g.vram_used)} / ${fmtGb(g.vram_total)}` : "—"}</div>
         </div>
-        <div class="grid grid-3">
-          <div><div class="metric-label">Temp</div><div class="metric-value" style="font-size:18px" id="dash-temp">${g.temperature != null ? Number(g.temperature).toFixed(0) + "°C" : "—"}</div></div>
-          <div><div class="metric-label">Power</div><div class="metric-value" style="font-size:18px" id="dash-power">${g.power_draw != null ? Number(g.power_draw).toFixed(0) + " W" : "—"}</div></div>
-          <div><div class="metric-label">Fan Control</div><div class="metric-value" style="font-size:15px;line-height:1.35" id="dash-fan">
-            ${g.fan_available
-              ? `Target: ${g.fan_target != null ? Number(g.fan_target).toFixed(0) : "—"}%<br/>PWM: ${g.fan_pwm != null ? Number(g.fan_pwm).toFixed(0) : "—"}%`
-              : `Target: —<br/>PWM: —<br/><span style="font-size:11px;color:var(--text-faint)">Status: unavailable</span>`}
-          </div></div>
-        </div>
-        <div class="grid grid-3">
-          <div><div class="metric-label">Clocks</div><div class="metric-sub mono" id="dash-clocks">${g.clocks != null ? g.clocks + " MHz" : "—"}</div></div>
-          <div><div class="metric-label">Mem Clock</div><div class="metric-sub mono" id="dash-memclock">${g.mem_clock != null ? g.mem_clock + " MHz" : "—"}</div></div>
-          <div><div class="metric-label">Model VRAM (Ollama)</div><div class="metric-sub mono" id="dash-modelvram">${modelVram ? fmtBytes(modelVram) : "—"}</div></div>
-        </div>
-      </div>`;
-    renderUtilBar(document.getElementById("dash-gpu-util"), g.utilization ?? null);
-    const vramBar = document.getElementById("dash-vram-bar");
-    if (vramBar && g.vram_total) {
-      const p = (g.vram_used / g.vram_total) * 100;
-      vramBar.innerHTML = `<div class="gpu-bar"><div class="bar"><div style="width:${p.toFixed(1)}%;background:var(--accent)"></div></div><span class="pct">${vramPct || 0}%</span></div>`;
-    }
+      </div>
+      ${g.vram_total ? barHtml(vramPct) : ""}
+      <div class="hw-kv">
+        <div><div class="k">Power</div><div class="v" id="dash-power">${orDash(fmtWatts(g.power_draw))}</div></div>
+        <div><div class="k">Temperature</div><div class="v" id="dash-temp">${orDash(fmtTempC(g.temperature))}</div></div>
+        <div><div class="k">Model VRAM (Ollama)</div><div class="v" id="dash-modelvram" title="sum of running models' size_vram from /api/ps — not GPU telemetry">${modelVram ? fmtGb(modelVram) : "—"}</div></div>
+        <div><div class="k">Fan Target</div><div class="v">${g.fan_available && g.fan_target != null ? Math.round(g.fan_target) + "%" : "—"}</div></div>
+        <div><div class="k">Fan PWM</div><div class="v">${g.fan_available && g.fan_pwm != null ? Math.round(g.fan_pwm) + "%" : "—"}</div></div>
+        <div><div class="k">Clocks</div><div class="v">${g.clocks != null ? g.clocks + " MHz" : "—"}</div></div>
+      </div>
+      ${sysLine ? `<div class="hw-foot" id="dash-gpu-sys">${sysLine}</div>` : ""}
+      ${extra ? `<div class="hw-mini-gpus">${extra}</div>` : ""}`;
   }
 
-  /* Compact running block — full workflow lives on the Running page. */
+  /* ---- HARDWARE: Storage card (SystemCollector disk aggregate — no df
+   * polling, no new collector: the snapshot already samples it) ---- */
+  function drawStorage(disk) {
+    const el = document.getElementById("dash-hw-storage");
+    if (!el) return;
+    if (!disk || !disk.total) {
+      el.innerHTML = `
+        <div class="hw-card-head"><span class="hw-icon">💾</span><span class="hw-name">Storage</span></div>
+        <div class="hw-loading">💾 Storage data unavailable</div>`;
+      return;
+    }
+    const pct = fmtPct(disk.percent);
+    el.innerHTML = `
+      <div class="hw-card-head"><span class="hw-icon">💾</span><span class="hw-name">Storage</span></div>
+      <div class="hw-main">
+        <div class="hw-pct-block">
+          <div class="hw-pct">${orDash(pct)}</div>
+          <div class="hw-pct-sub" id="dash-disk-sub">${fmtBytes(disk.used)} / ${fmtBytes(disk.total)}</div>
+        </div>
+        <div class="hw-ring-wrap">${ringSvg(disk.percent, orDash(pct))}</div>
+      </div>
+      ${barHtml(disk.percent)}
+      <div class="hw-kv">
+        <div><div class="k">Used</div><div class="v" id="dash-disk-used">${fmtBytes(disk.used)}</div></div>
+        <div><div class="k">Free</div><div class="v" id="dash-disk-free">${fmtBytes(disk.free)}</div></div>
+        <div><div class="k">Total</div><div class="v" id="dash-disk-total">${fmtBytes(disk.total)}</div></div>
+      </div>
+      ${Array.isArray(disk.partitions) && disk.partitions.length
+        ? `<div class="hw-foot" id="dash-disk-parts">${disk.partitions.slice(0, 3).map((p) => `${esc(p.mount || p.device || "?")} ${fmtPct(p.percent) || "—"}`).join(" · ")}</div>`
+        : ""}`;
+  }
+
+  /* ---- RUNNING MODELS (ollama ps style table) ----
+   * Data: snap.ollama.running — OllamaClient → /api/ps (the exact data
+   * behind `ollama ps`). Processor split is the EXISTING honest derivation
+   * from size vs size_vram (labelled derived — NOT a telemetry split).
+   * Actions reuse the Running page handlers (window.Actions run-chat /
+   * run-stop) — no duplicated functionality. */
+  function splitInfo(m) {
+    const size = m.size || 0;
+    const vram = m.size_vram || 0;
+    if (!size || !vram) return null;
+    if (vram < size) return { kind: "split", gpuPct: Math.round((vram / size) * 100) };
+    return { kind: "gpu" };
+  }
+  function processorCell(m) {
+    const s = splitInfo(m);
+    if (!s) return `<span class="text-faint" title="Ollama did not report size/size_vram — no split is invented">—</span>`;
+    if (s.kind === "gpu") return `<span class="badge running-badge" title="derived from /api/ps size vs size_vram — not a telemetry split">100% GPU</span>`;
+    return `<span class="badge cap" title="derived from /api/ps size vs size_vram — not a telemetry split: CPU ${fmtBytes(m.size - m.size_vram)}">${s.gpuPct}% GPU / ${100 - s.gpuPct}% CPU</span>`;
+  }
+  function runningTableHtml(rows) {
+    if (!rows.length) {
+      return `<div class="empty text-dim">🌙 No models loaded
+        <div class="text-faint" style="margin-top:4px">Run one from <a href="#models">Models</a>.</div></div>`;
+    }
+    return `<div class="ps-table-wrap"><table class="ps-table">
+      <thead><tr>
+        <th>Model</th><th>ID</th><th class="num">Size</th><th>Processor</th>
+        <th class="num">VRAM</th><th class="num">Context</th><th class="num">Duration</th><th>Status</th><th>Actions</th>
+      </tr></thead>
+      <tbody>
+        ${rows.map((m) => {
+          const id = m.digest ? String(m.digest).slice(0, 12) : null;
+          const ctx = m.context_length != null ? m.context_length : (m.details && m.details.context_length);
+          return `<tr>
+            <td class="mono ps-model" title="${esc(m.name)}">${esc(m.name)}</td>
+            <td class="mono text-dim">${id ? esc(id) : `<span class="text-faint">—</span>`}</td>
+            <td class="num">${m.size != null ? fmtBytes(m.size) : "—"}</td>
+            <td>${processorCell(m)}</td>
+            <td class="num" style="color:var(--accent)">${m.size_vram != null ? fmtBytes(m.size_vram) : "—"}</td>
+            <td class="num">${ctx != null ? fmtNum(ctx, 0) : `<span class="text-faint">—</span>`}</td>
+            <td class="num text-dim" title="time until unload (expires_at)">${orDash(fmtDur(remainingSec(m.expires_at)))}</td>
+            <td><span class="badge running-badge">● running</span></td>
+            <td><div class="ps-actions">
+              <button class="btn-sm" data-action="run-chat" data-model="${esc(m.name)}" title="Chat with this model">💬 Chat</button>
+              <button class="btn-sm btn-danger" data-action="run-stop" data-model="${esc(m.name)}" title="Unload from memory">⏹ Stop</button>
+            </div></td>
+          </tr>`;
+        }).join("")}
+      </tbody>
+    </table>
+    <div class="text-faint" style="margin:8px 2px 2px;font-size:11.5px">
+      Processor split is derived from /api/ps size vs size_vram — not an exact telemetry split. Model VRAM ≠ GPU VRAM (see the GPU card).
+    </div></div>`;
+  }
+
   function drawRunning(snap) {
     const runEl = document.getElementById("dash-running");
     if (!runEl) return;
     const ollama = snap.ollama || {};
-    if (!ollama.online) {
-      runEl.innerHTML = `<div class="empty text-dim">🔌 Ollama offline — running models unknown</div>`;
+    if (ollama.online === false) {
+      runEl.innerHTML = `<div class="empty text-dim">🔌 Ollama offline — running models unknown
+        <div class="text-faint" style="margin-top:4px">Start Ollama or check the endpoint; the table updates automatically.</div></div>`;
       return;
     }
-    const running = ollama.running || [];
-    if (!running.length) {
-      runEl.innerHTML = `<div class="empty text-dim">🌙 No models loaded
-        <div class="text-faint" style="margin-top:4px">Run one from <a href="#models">Models</a>.</div></div>`;
-      return;
-    }
-    runEl.innerHTML = running.map((m) => {
-      const size = m.size || 0, vram = m.size_vram || 0;
-      // split badge only when the data is really there (no heuristics)
-      const split = (size && vram && vram < size)
-        ? ` · ${Math.round((vram / size) * 100)}% GPU`
-        : (size && vram && vram >= size ? " · 100% GPU" : "");
-      return `
-        <div style="display:flex;justify-content:space-between;align-items:center;padding:7px 0;border-bottom:1px solid var(--border)">
-          <div>
-            <div class="mono" style="word-break:break-all">${esc(m.name)}</div>
-            <div class="text-faint" style="font-size:11px">${fmtBytes(vram)} model VRAM${split}</div>
-          </div>
-          <span class="badge loaded">loaded</span>
-        </div>`;
-    }).join("");
+    if (!Array.isArray(ollama.running)) return; // partial snapshot: keep the last known table
+    runEl.innerHTML = runningTableHtml(ollama.running);
   }
 
   /* ---- ELECTRICITY tile (compact summary) ----
@@ -505,46 +725,36 @@
     drawSnapshot(snap, "");
     // electricity tile: throttled soft refresh riding the existing WS cadence
     loadElectricitySummary();
-    // live GPU bars + tiles (same shared snapshot as the GPU block above)
-    const gpu = snap.gpu || {};
-    const g = (gpu.gpus || [])[0];
-    if (g) {
-      const utilEl = document.getElementById("dash-gpu-util");
-      if (utilEl) renderUtilBar(utilEl, g.utilization ?? null);
-      const vramBar = document.getElementById("dash-vram-bar");
-      if (vramBar && g.vram_total) {
-        const p = (g.vram_used / g.vram_total) * 100;
-        vramBar.innerHTML = `<div class="gpu-bar"><div class="bar"><div style="width:${p.toFixed(1)}%;background:var(--accent)"></div></div><span class="pct">${p.toFixed(0)}%</span></div>`;
+    // live chart pushes (same shared snapshot as the cards above)
+    if (!charts) return;
+    try {
+      const gpu = snap.gpu || {};
+      const g = (gpu.gpus || [])[0];
+      const ts = snap.ts || Date.now() / 1000;
+      const p = (v) => (v != null ? v : null);
+      if (g) {
+        if (charts.power) charts.power.push(ts, p(g.power_draw));
+        if (charts.gpu) charts.gpu.push(ts, p(g.utilization));
+        if (charts.vram && g.vram_used != null) charts.vram.push(ts, g.vram_used / (1024 ** 3));
+        if (charts.temp) charts.temp.push(ts, p(g.temperature));
+        if (charts.fanTarget && g.fan_target != null) charts.fanTarget.push(ts, g.fan_target);
+        if (charts.fanPwm && g.fan_pwm != null) charts.fanPwm.push(ts, g.fan_pwm);
       }
-      const powerEl = document.getElementById("dash-power");
-      if (powerEl) powerEl.textContent = `${g.power_draw != null ? Number(g.power_draw).toFixed(0) + " W" : "—"}`;
-      const tempEl = document.getElementById("dash-temp");
-      if (tempEl) tempEl.textContent = `${g.temperature != null ? Number(g.temperature).toFixed(0) + "°C" : "—"}`;
-      const fanEl = document.getElementById("dash-fan");
-      if (fanEl) {
-        fanEl.innerHTML = g.fan_available
-          ? `Target: ${g.fan_target != null ? Number(g.fan_target).toFixed(0) : "—"}%<br/>PWM: ${g.fan_pwm != null ? Number(g.fan_pwm).toFixed(0) : "—"}%`
-          : `Target: —<br/>PWM: —<br/><span style="font-size:11px;color:var(--text-faint)">Status: unavailable</span>`;
-      }
-      const clockEl = document.getElementById("dash-clocks");
-      if (clockEl) clockEl.textContent = `${g.clocks != null ? g.clocks + " MHz" : "—"}`;
-      const memEl = document.getElementById("dash-memclock");
-      if (memEl) memEl.textContent = `${g.mem_clock != null ? g.mem_clock + " MHz" : "—"}`;
-      if (charts) {
-        try {
-          const ts = snap.ts || Date.now() / 1000;
-          const p = (v) => (v != null ? v : null);
-          if (charts.power) charts.power.push(ts, p(g.power_draw));
-          if (charts.gpu) charts.gpu.push(ts, p(g.utilization));
-          if (charts.vram && g.vram_used != null) charts.vram.push(ts, g.vram_used / (1024 ** 3));
-          if (charts.temp) charts.temp.push(ts, p(g.temperature));
-          if (charts.fanTarget && g.fan_target != null) charts.fanTarget.push(ts, g.fan_target);
-          if (charts.fanPwm && g.fan_pwm != null) charts.fanPwm.push(ts, g.fan_pwm);
-        } catch (e) { console.error("chart live update failed", e); }
-      }
-    }
+      const cpuPct = snap.cpu && snap.cpu.percent != null ? snap.cpu.percent : null;
+      if (charts.cpu) charts.cpu.push(ts, cpuPct);
+      if (charts.ram && snap.ram && snap.ram.used != null) charts.ram.push(ts, snap.ram.used / (1024 ** 3));
+      if (snap.disk && snap.disk.total) charts.disk.push(ts, (snap.disk.used / snap.disk.total) * 100);
+    } catch (e) { console.error("chart live update failed", e); }
   }
 
   window.Pages = window.Pages || {};
-  window.Pages.dashboard = { render, onSnapshot, drawSnapshot, drawGpu, drawRunning, renderProcessor, startProcessorPolling, stopProcessorPolling, markProcStaleIfDue, touchProcOk, refreshProcessor, loadElectricitySummary, renderElecTile };
+  window.Pages.dashboard = {
+    render, onSnapshot,
+    drawSnapshot, drawCpu, drawRam, drawGpu, drawStorage, drawJobsTile,
+    drawRunning, runningTableHtml, processorCell, splitInfo,
+    fmtPct, fmtWatts, fmtTempC, fmtGb, fmtMhz, fmtDur, ringSvg,
+    renderProcessor, startProcessorPolling, stopProcessorPolling,
+    markProcStaleIfDue, touchProcOk, refreshProcessor,
+    loadElectricitySummary, renderElecTile,
+  };
 })();
